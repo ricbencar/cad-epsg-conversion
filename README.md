@@ -350,8 +350,6 @@ Column key (left to right): Source datum; Published RMSE, m; Published maximum a
 
 These are dataset-validation statistics, not a guaranteed error for every input vertex. DGT also supplies polynomial, Molodensky and Bursa–Wolf alternatives; their parameters and reported residuals are available in its transformation parameter sheet. [DGT, Mainland coordinate transformations][dgt-transform]; [IGP/DGT, Transformation parameters][dgt-parameters]
 
-For reproducible mainland work, this README recommends using the DGT grids for these two datum families and recording the exact files. This is an implementation recommendation based on the official source and traceable validation; it is not a claim that DGT has certified this CAD application.
-
 ### 5.2 Published parameter methods in context
 
 **Table 4. Horizontal residual RMSE for DGT's fitted parameter methods, in metres.** Values are component statistics from the published parameter sheet; they are not directly interchangeable with a single combined horizontal error statistic.
@@ -956,7 +954,7 @@ The core packages are pinned to the API baseline used for application verificati
 
 ### 10.2 Create and activate the virtual environment
 
-Place `script.py`, `README.md` and the four chosen grid files in a working folder, for example `C:\DOWNLOADS\cad-epsg-conversion`. Open **Windows Command Prompt** (`cmd.exe`) there. The following are shell commands, not Python statements for the `>>>` prompt:
+Place `script.py`, `README.md` and the four chosen grid files in a working folder and open **Windows Command Prompt** (`cmd.exe`) there. The following are shell commands, not Python statements for the `>>>` prompt:
 
 ```bat
 cd /d "C:\DOWNLOADS\cad-epsg-conversion"
