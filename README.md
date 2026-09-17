@@ -35,6 +35,8 @@ In geodetic terminology, a *coordinate conversion* changes representation withou
 | Interface | English Tkinter GUI and command-line interface |
 | Output choices | DXF or DWG; one selected format for the complete |
 |  | batch |
+| Incomplete objects | Omit unprocessable geometry, report it and continue |
+|  | by default; strict mode is optional |
 | Main report | `report_3763.json`, or |
 |  | `report_<target EPSG>.json` |
 | Source identification | Declared by the user; not inferred automatically |
@@ -350,6 +352,8 @@ Column key (left to right): Source datum; Published RMSE, m; Published maximum a
 
 These are dataset-validation statistics, not a guaranteed error for every input vertex. DGT also supplies polynomial, Molodensky and Bursa–Wolf alternatives; their parameters and reported residuals are available in its transformation parameter sheet. [DGT, Mainland coordinate transformations][dgt-transform]; [IGP/DGT, Transformation parameters][dgt-parameters]
 
+For reproducible mainland work, this README recommends using the DGT grids for these two datum families and recording the exact files. This is an implementation recommendation based on the official source and traceable validation; it is not a claim that DGT has certified this CAD application.
+
 ### 5.2 Published parameter methods in context
 
 **Table 4. Horizontal residual RMSE for DGT's fitted parameter methods, in metres.** Values are component statistics from the published parameter sheet; they are not directly interchangeable with a single combined horizontal error statistic.
@@ -392,7 +396,7 @@ $$ \mathbf{q}_s^{(j+1)}=\mathbf{q}_t-\vec{\delta}(\mathbf{q}_s^{(j)}). $$
 
 The correction is defined as a function of source position. Subtracting one correction evaluated at the target position is generally not the rigorous inverse. The application requests PROJ's inverse grid operation when converting from ETRS89 to a historical datum. [IOGP, Guidance Note 7-2][iogp-gn7]; [PROJ, Horizontal grid shift][proj-hgrid]
 
-The application uses mandatory grid stages. Missing files, incompatible datum headers, loading failures and positions outside valid coverage stop the drawing conversion. Enabling ballpark transformations or allowing unresolved CAD objects does not bypass a required local grid.
+The application uses mandatory grid stages. Missing files, incompatible datum headers, loading failures and positions outside valid coverage stop the drawing conversion. Enabling ballpark transformations or omitting unprocessable CAD objects does not bypass a required local grid.
 
 ### 5.5 Grid filenames required by `script.py`
 
@@ -476,7 +480,9 @@ A chord-error requirement $e_c\leq\varepsilon_s$ gives, for $0<\varepsilon_s<R$:
 
 $$ \Delta\theta\leq2\arccos(1-\varepsilon_s/R). $$
 
-For small angular intervals, $e_c\approx R\Delta\theta^2/8$. These elementary relationships explain why tighter faceting tolerances increase the vertex count. The application uses `ezdxf` path flattening rather than a circle-only formula, so the same user parameter can be applied to different supported curve types.
+For small angular intervals, $e_c\approx R\Delta\theta^2/8$. These elementary relationships explain why tighter faceting tolerances increase the vertex count. Ordinary 2D polyline bulges are sampled directly from their signed circular sweep and radius. Other supported curve types use `ezdxf` path flattening with the same user tolerance.
+
+A CAD bulge is the tangent of one quarter of the signed arc angle. The implementation evaluates circular samples in a local frame based on the segment chord, avoiding subtraction of a distant circle centre from large national-grid coordinates. The original segment endpoints remain explicit vertices. Small nonzero chords are not treated as coincident merely because their absolute coordinates are large. An arc requiring more than 1,000,000 facets is rejected with a diagnostic asking the user to check source units and tolerance; the requested tolerance is not silently relaxed.
 
 The default tolerance is **0.01 source drawing units** for a projected source. If those units are metres, it represents a centimetre-scale source-curve faceting criterion. The default for a geographic source is **0.000001 degrees**. A degree tolerance does not correspond to a uniform metre tolerance: its east-west distance varies with latitude.
 
@@ -510,11 +516,13 @@ The script estimates the Jacobian with finite differences. The derivative step i
 | ARC, CIRCLE, | Facet source path, | Original analytical |
 | ELLIPSE, SPLINE, | transform vertices, | curve type is replaced |
 | HELIX | create polyline |  |
-| LWPOLYLINE and | Flatten path, | Bulges become |
-| ordinary 2D POLYLINE | including bulges | straight polyline |
-|  |  | segments; |
-|  |  | widths/thickness are |
-|  |  | not guaranteed |
+| LWPOLYLINE and | Transform vertices; | Actual closed flag |
+| ordinary 2D POLYLINE | sample circular | retained; widths use |
+|  | bulges directly | drawing units; |
+|  |  | thickness is local |
+| Fitted 2D POLYLINE | Facet stored arcs; | Source fit tags saved |
+|  | local affine mapping | in report when fitted |
+|  | when no bulges exist | arcs are materialized |
 | 3D POLYLINE, polygon | Transform stored | Existing |
 | mesh, polyface mesh | vertex locations | topology/vertex |
 |  |  | relationships are |
@@ -530,8 +538,8 @@ The script estimates the Jacobian with finite differences. The derivative step i
 | HATCH, MPOLYGON | Transform faceted | Pattern definition |
 |  | boundary loops | stays local; |
 |  |  | invalid/nonplanar |
-|  |  | results stop |
-|  |  | publication |
+|  |  | objects are omitted |
+|  |  | and reported |
 | INSERT | Preflight, explode, | Shared block and |
 |  | recursively transform | parametric editing |
 |  | displayed geometry | semantics are not |
@@ -541,6 +549,10 @@ The script estimates the Jacobian with finite differences. The derivative step i
 |  | geometry, explode, | recalculated as a new |
 |  | transform | engineering |
 |  | components | measurement |
+| ACAD_PROXY_ENTITY | Decode supported | Display geometry |
+|  | saved proxy graphics | only; proprietary |
+|  | before reprojection | semantics archived |
+|  |  | as source tags |
 | TEXT, MTEXT and | Local Jacobian/affine | Local approximation |
 | other transformable | treatment | is recorded |
 | entities |  |  |
@@ -562,13 +574,41 @@ Column key (left to right): Entity group; Processing strategy; Consequence requi
 
 Constant-elevation curve replacements generally become LWPOLYLINE entities. Varying-elevation or geocentric replacements use 3D POLYLINE entities. General graphic attributes, such as layer, colour and lineweight, are copied to replacements where supported; XDATA is copied where possible and source-entity provenance is added. This is not a promise of byte-for-byte preservation of all CAD data.
 
-### 6.6 Composite preflight and strict mode
+Ordinary lightweight and legacy 2D polylines receive dedicated handling. Their stored closed flag determines closure; no polygon vertex-count rule is applied to a CAD polyline. Single vertices, repeated vertices, short segments and two-vertex closed polylines are retained. Coordinates are first converted from the entity's object coordinate system to world coordinates, including its elevation and extrusion direction. All sampled coordinates are transformed and validated before the original geometry is changed.
 
-Before an INSERT or DIMENSION is destructively exploded, the application inspects its available geometry. Missing block definitions, recursive references, content that cannot be copied completely, inaccessible dimension geometry and XCLIP boundaries are treated as unresolved conditions. This avoids silently accepting a drawing from which unsupported block contents have disappeared.
+For a horizontal target representation, the native entity and its handle are retained. Legacy POLYLINE vertices also retain their original handles and attached data at the original vertex positions when extra arc samples are inserted. Constant and variable widths retain their values in drawing units; variable widths are interpolated by arc fraction across the new facets. Thickness is mapped locally at the first vertex, including the sign of the source extrusion. These choices preserve local styling, not an exact nonlinear transformation of the entire width or thickness envelope, and are identified in the report.
 
-The default **Stop if a geometric object cannot be transformed** option prevents publication of a drawing containing unresolved geometry. It still permits the documented curve faceting and local affine approximations. Strict mode is therefore a completeness gate for identified failures, not a proof of exact geodetic or semantic preservation.
+Fitted legacy polylines require a separate distinction. A circular bulge cannot generally survive unequal scaling in a native 2D POLYLINE, so a fitted object containing bulges is sampled before coordinate transformation. Curve-fit paths use both their original and inserted fit vertices. Where a spline-fit path has generated display vertices, only that display chain is used; its auxiliary spline-frame control points must not become visible connecting segments. The result is an ordinary polyline with the original closure and, where the target remains horizontal, its entity handle and retained display-vertex handles. Fit and tangent flags are cleared so a CAD application does not reinterpret the sampled geometry as a new fitted curve. Fitted polylines without bulges retain the reported local affine treatment. The underlying matrix restriction and vertex flags are described in the [ezdxf POLYLINE reference](https://ezdxf.readthedocs.io/en/stable/dxfentities/polyline.html).
 
-With strict mode disabled, a composite rejected during preflight may remain in its original, untransformed coordinates. Such an output can contain mixed reference systems. A handler failure that might have partly modified an object always stops publication of that drawing, even in non-strict mode.
+When fitted arcs are materialized, the JSON report records `fitted_polyline_faceted` and archives the original POLYLINE, VERTEX and SEQEND tags in `fitted_polyline_sources`. This includes the original fitting flags, tangents, stored coordinates, bulges and vertex XDATA; auxiliary control vertices are archived instead of inserted into the displayed output path. This is a source-data record, not preservation of the original fit-editing behaviour. References to other database objects in those tags do not constitute a complete independent copy of the referenced objects. If a spline-fitted object has control points but no identifiable stored display chain, the object is omitted and reported by default. The converter does not invent connecting geometry. Optional strict mode blocks publication for that condition.
+
+A varying-elevation or geocentric result without width or thickness can be represented by a 3D POLYLINE. If width or thickness would be lost by that representation, the object is omitted and reported by default. The same policy applies to a mapped thickness direction incompatible with a horizontal 2D polyline. Strict mode instead blocks publication when such an object cannot be represented.
+
+Degenerate data receives explicit treatment. A zero-length segment retains its coincident vertices; an active nonzero bulge on that segment is cleared and reported because it defines no finite circular arc. An empty legacy POLYLINE is retained. A zero-vertex LWPOLYLINE cannot be serialized by the DXF writer and contains no geometry: it is omitted with a warning identifying its source handle, without adding fictitious vertices. Invalid object coordinates and unrepresentable arcs cause that object to be omitted and reported in the default mode. A failure of the coordinate operation, including required-grid coverage, still stops drawing publication.
+
+Proxy objects are a distinct case. An `ACAD_PROXY_ENTITY` represents a custom object whose proprietary internals cannot be transformed directly by ezdxf. Its saved proxy graphics may provide native display geometry suitable for extraction; this does not recover its original application behaviour. [ezdxf, ACADProxyEntity](https://ezdxf.readthedocs.io/en/stable/dxfentities/acad_proxy_entity.html)
+
+The application checks the saved graphics stream before replacing a proxy, rejecting incomplete chunks, unsupported drawing operations and undecodable geometry. Supported snapshots become ordinary CAD entities and follow the normal reprojection handlers. Proxies in reachable block definitions are decoded in block coordinates before insertion transformations are applied. Unreferenced blocks and excluded paper-space layouts are not independently processed. A snapshot may reflect the display state saved by the authoring application rather than the full mathematical model of its custom object.
+
+Proxy print and rendering attributes require separate treatment. Command 26 identifies a plot-style trait using two 32-bit fields: a selection mode and a resource index. The four modes are ByLayer, ByBlock, dictionary default and explicit plot style. Commands 34 and 35 describe material and mapper traits. These attributes do not supply drawing vertices. A material mapper controls the placement of textures on surfaces; it is distinct from a geometry transformation matrix.
+
+The application accepts these appearance commands while continuing to decode and reproject their associated geometry. It validates command framing, the eight-byte plot-style record and its mode, and the 28-byte mapper record. The embedded material reference remains opaque. The complete original command bytes are retained in the source archive. Proxy resource indices are not guessed to be native DXF handles. A proxy lineweight outside the supported CAD range is replaced with **ByLayer** (`-1`) and recorded as an appearance warning; it does not prevent otherwise valid geometry from being converted.
+
+Replacement entities inherit existing native plot-style and material references from their parent proxy. Plot-style references are also carried through subsequent curve faceting. Per-primitive proxy plot styles, embedded material assignments and texture mapping are not reconstructed: the conversion report explicitly warns that printing or rendered appearance may differ. Inspect those properties in CAD before plotting or rendering. These appearance warnings do not count as unresolved geometry; unknown drawing operations, clipping commands and malformed geometric data still prevent strict-mode publication.
+
+The original proxy DXF tags, source handle, graphics hash and decoded command names are retained in the report's `proxy_entity_sources`. Coordinates in this archive remain in their source frame; block-local records are labelled accordingly. The archive does not transform opaque application data or recursively copy external resources. Keep the original drawing as the authoritative source for the proprietary object and keep the report with the converted drawing. A decoded display snapshot is not a native, editable Civil 3D, Architecture or other application-specific object.
+
+If saved graphics are absent, corrupt or unsupported, the default conversion omits the proxy from the processed geometry, records its type, handle and reason as `entity_omitted`, and continues with the remaining objects. Its original source coordinates are not deliberately left active in the converted output. Under strict mode, `proxy_unresolved` identifies the decoding problem and prevents publication. To recover the omitted content, open the original drawing in the CAD application that understands the custom object, convert or export it to standard CAD entities, and run the conversion again.
+
+### 6.6 Best-effort conversion, composite preflight and strict mode
+
+Before an INSERT or DIMENSION is destructively exploded, the application inspects its available geometry. Missing block definitions, recursive references, content that cannot be copied completely, inaccessible dimension geometry and XCLIP boundaries are treated as unresolved conditions. In the default best-effort mode, a composite that cannot be processed safely is omitted and identified in the report. The omission can cover the entire composite, not only one internal primitive. Other processable objects continue through reprojection.
+
+The **Stop if a geometric object cannot be transformed** option is **off by default**. With this setting, an object-specific processing failure causes the affected object and any partial replacement geometry to be removed from the processed output. The report identifies the omitted entity type, source handle and reason, and the conversion continues. Keep the original drawing together with the report so that omitted content can be located and recovered. Completion with omissions is explicitly distinguished from completion without omissions.
+
+Select **Stop if a geometric object cannot be transformed**, or pass `--strict` on the command line, when publication must be blocked by any identified unresolved geometric object. Strict mode still permits the documented curve faceting and local affine approximations. It is a completeness gate for identified failures, not a proof of exact geodetic or semantic preservation.
+
+Best-effort processing applies to individual CAD objects. It does not bypass invalid job settings, unavailable or incompatible datum grids, coordinate-operation failures, cancellation, drawing read/write failures or output-verification failures. Such conditions still stop publication of the affected drawing. Source drawing files are unchanged.
 
 Paper-space geometry is excluded by default. Retained block definitions, layout objects and coordinate-bearing metadata should not be described as universally reprojected simply because the model-space geometry was processed.
 
@@ -756,9 +796,9 @@ The preview requires Pillow (`PIL`) as well as the ezdxf drawing frontend and Tk
 | Transform | Off | Include layout geometry |
 | paper-space |  | only when explicitly |
 | geometry |  | intended |
-| Stop if a geometric | On | Block drawings with |
-| object cannot be |  | unresolved geometry |
-| transformed |  |  |
+| Stop if a geometric | Off | Omit unprocessable objects |
+| object cannot be |  | and continue; enable to |
+| transformed |  | require strict publication |
 | Allow ballpark | Off | Permit available |
 | datum |  | approximate PROJ |
 | transformations |  | operations outside |
@@ -785,9 +825,9 @@ The preview requires Pillow (`PIL`) as well as the ezdxf drawing frontend and Tk
 3. Confirm **Source EPSG:27493** and **Target EPSG:3763**, if those are the documented systems.
 4. Choose the output folder and inspect the automatically selected output format.
 5. Confirm the grid selection with **Validate transformation**.
-6. Review Advanced settings, particularly the curve tolerance, Z policy and strict mode.
+6. Review Advanced settings, particularly the curve tolerance and Z policy. Leave **Stop if a geometric object cannot be transformed** off to complete conversion while reporting omitted objects; enable it when every identified geometric object must pass.
 7. Select **Convert drawings** and follow the Log tab.
-8. Open the completed drawing in the intended CAD application and review `report_3763.json`.
+8. Open the completed drawing in the intended CAD application and review `report_3763.json`, including omitted counts and the listed object handles and reasons.
 9. Compare relevant control points, dimensions, layers, hatches and important complex objects.
 
 ## 9. Command-line operation
@@ -832,6 +872,14 @@ python script.py "survey_EPSG3763.dxf" ^
 
 If `--format` is omitted, the first input's extension chooses the output format for the entire batch. Quote paths that contain spaces. A relative `--grid-dir` is resolved from the command's working directory; this is an explicitly supplied path, distinct from the default grid search.
 
+To require strict completion without identified unresolved geometry:
+
+```bat
+python script.py "survey.dxf" --output-dir "output" --strict
+```
+
+Without `--strict`, unprocessable objects are omitted and the remaining geometry is converted. Review the report before relying on the completeness of the output.
+
 ### 9.2 Complete option reference
 
 | Argument or option | Default / effect |
@@ -848,8 +896,10 @@ If `--format` is omitted, the first input's extension chooses the output format 
 | `--transform-paper-space` | Include paper-space geometry |
 | `--allow-ballpark` | Permit available ballpark operations; does |
 |  | not bypass mandatory local grids |
-| `--allow-unresolved` | Permit untouched preflight-rejected |
-|  | composites; see Section 6.6 |
+| `--strict` | Block publication if geometry cannot be |
+|  | transformed; off by default |
+| `--allow-unresolved` | Compatibility alias for the default |
+|  | best-effort omission policy; see Section 6.6 |
 | `--overwrite` | Permit replacing existing CAD outputs |
 | `--oda` | Explicit ODA executable path |
 | `--grid-dir` | Exclusive NTv2 directory |
@@ -858,13 +908,13 @@ If `--format` is omitted, the first input's extension chooses the output format 
 
 Keep-Z and DXF audit/recovery are enabled for normal CLI jobs; they have no CLI toggles. The internal ODA timeout is 900 seconds per converter invocation and is not exposed as a GUI/CLI setting. The Python `ConversionJob` interface contains these additional fields.
 
-Ordinary completion returns exit code `0`; handled conversion failure returns `1`; missing required CLI output-directory information returns `2`. A GUI-oriented executable built with `--windowed` does not provide a normal console for help and progress text. Use the Python command or the console build described below when command-line output is needed.
+Completion, including completion with reported omissions, returns exit code `0`; handled conversion failure returns `1`; missing required CLI output-directory information returns `2`. An exit code of `0` alone does not establish geometric completeness: inspect the report status and `omitted` counters. A GUI-oriented executable built with `--windowed` does not provide a normal console for help and progress text. Use the Python command or the console build described below when command-line output is needed.
 
 ## 10. Windows installation and virtual environment
 
 ### 10.1 Runtime and build dependencies
 
-**Pillow**, imported in Python as **`PIL`**, is required for visualization. **`pip`** is the package installer. The preview uses the ezdxf drawing frontend with a custom Tk Canvas backend. That frontend imports Pillow even when raster images are represented by outlines. Installing only `ezdxf` and `pyproj` therefore does not establish that the preview can start. [Pillow, Installation][pillow-install]; [ezdxf, Setup][ezdxf-setup]
+**Pillow**, imported in Python as **`PIL`**, is required for visualization. **`pip`** is the package installer. The preview uses the ezdxf drawing frontend with a custom Tk Canvas backend. That frontend imports Pillow even when raster images are represented by outlines. Installing only `ezdxf` and `pyproj` therefore does not establish that the preview can start.
 
 **Table 12. Complete component inventory for this application.**
 
@@ -946,15 +996,15 @@ Ordinary completion returns exit code `0`; handled conversion failure returns `1
 
 Column key (left to right): Component or pip package; Python import name; Function and installation scope.
 
-Pip resolves declared dependencies automatically; the installation command nevertheless lists every runtime package above explicitly. Core ezdxf does not declare Pillow as a mandatory base dependency. Installing `ezdxf[draw]` would pull additional drawing backends, including libraries that this application's custom preview does not use. Matplotlib, PyQt, PySide and PyMuPDF are unnecessary for this implementation. [ezdxf, Setup][ezdxf-setup]
+Pip resolves declared dependencies automatically; the installation command nevertheless lists every runtime package above explicitly. Core ezdxf does not declare Pillow as a mandatory base dependency. Installing `ezdxf[draw]` would pull additional drawing backends, including libraries that this application's custom preview does not use. Matplotlib, PyQt, PySide and PyMuPDF are unnecessary for this implementation.
 
-Tkinter, Tcl/Tk, `venv`, `ensurepip`, `argparse`, `json`, `pathlib`, `threading`, `ctypes` and the other standard-library components are provided by the Python installation. **Do not run `pip install tkinter`, `pip install PIL` or `pip install venv`.** Select Tcl/Tk and pip when installing Python; the image package's install name is `Pillow`. [Python Software Foundation, venv][python-venv]; [Pillow, Installation][pillow-install]
+Tkinter, Tcl/Tk, `venv`, `ensurepip`, `argparse`, `json`, `pathlib`, `threading`, `ctypes` and the other standard-library components are provided by the Python installation. **Do not run `pip install tkinter`, `pip install PIL` or `pip install venv`.** Select Tcl/Tk and pip when installing Python; the image package's install name is `Pillow`.
 
 The core packages are pinned to the API baseline used for application verification. Auxiliary version bounds permit compatible upgrades; they do not claim that every future package combination has been tested. The build record must retain the versions actually resolved by pip.
 
 ### 10.2 Create and activate the virtual environment
 
-Place `script.py`, `README.md` and the four chosen grid files in a working folder and open **Windows Command Prompt** (`cmd.exe`) there. The following are shell commands, not Python statements for the `>>>` prompt:
+Place `script.py`, `README.md` and the four chosen grid files in a working folder, for example `C:\DOWNLOADS\cad-epsg-conversion`. Open **Windows Command Prompt** (`cmd.exe`) there. The following are shell commands, not Python statements for the `>>>` prompt:
 
 ```bat
 cd /d "C:\DOWNLOADS\cad-epsg-conversion"
@@ -964,7 +1014,7 @@ python -c "import sys; assert sys.prefix != sys.base_prefix"
 python -c "import sys; print(sys.executable)"
 ```
 
-The printed path should end in the project's `.venv\Scripts\python.exe`. Python creates the virtual environment; its activation script selects that environment in the current command shell. Activation usually adds `(.venv)` to the prompt. Every subsequent `python -m pip` command then targets this environment rather than an unrelated global installation. The `call` form also works when these commands are saved in a Windows batch file. [Python Software Foundation, venv][python-venv]
+The printed path should end in the project's `.venv\Scripts\python.exe`. Python creates the virtual environment; its activation script selects that environment in the current command shell. Activation usually adds `(.venv)` to the prompt. Every subsequent `python -m pip` command then targets this environment rather than an unrelated global installation. The `call` form also works when these commands are saved in a Windows batch file.
 
 If `py -3.12` cannot select an interpreter, install 64-bit Python 3.12 with its launcher, pip and Tcl/Tk components, or use the full path to that interpreter for the environment-creation command. An existing environment can be activated without creating it again.
 
@@ -982,7 +1032,7 @@ python -m pip install --upgrade ^
 python -m pip check
 ```
 
-`ensurepip` bootstraps pip from Python's bundled resources; it does not obtain the newest pip release from the internet. The following `pip install --upgrade pip setuptools wheel` command upgrades the installation tools from the configured package index. Normal dependency installation requires access to that index or an equivalent local wheel repository. [Python Software Foundation, ensurepip][python-ensurepip]; [pip, Installation][pip-installation]
+`ensurepip` bootstraps pip from Python's bundled resources; it does not obtain the newest pip release from the internet. The following `pip install --upgrade pip setuptools wheel` command upgrades the installation tools from the configured package index. Normal dependency installation requires access to that index or an equivalent local wheel repository.
 
 `--upgrade` requests the newest available version allowed by each requirement. The exact ezdxf and pyproj pins retain their specified versions; the bounded supporting packages can advance within their ranges. Quotes are necessary around requirements containing `<` or `>` because Command Prompt otherwise interprets those characters as redirection. Each caret `^` must be the last character on its line, with **no trailing spaces**.
 
@@ -1026,7 +1076,7 @@ python script.py
 deactivate
 ```
 
-Run `deactivate` after the application or build finishes. Closing the shell also ends its activation. An environment is a local development installation, not a portable distribution; recreate it rather than copying it to another machine. [Python Software Foundation, venv][python-venv]
+Run `deactivate` after the application or build finishes. Closing the shell also ends its activation. An environment is a local development installation, not a portable distribution; recreate it rather than copying it to another machine.
 
 | Shell | Activation command | Continuation |
 | --- | --- | --- |
@@ -1059,7 +1109,7 @@ Each ODA call receives an isolated copied input, requests `ACAD2018` output, dis
 
 The build below is intended to produce a **single Windows executable with all Python dependencies, the GUI runtime, PROJ resources and all four transformation grids embedded**. After validation, DXF opening, preview, coordinate conversion and DXF output require no separate Python, pip, Pillow or grid-file installation on the destination computer. Windows, normal system facilities and access to the user's drawing files are still required.
 
-**DWG input, output and preview require ODA File Converter separately.** The current program therefore provides self-contained DXF operation, with an external dependency for DWG. A fully self-contained executable covering both DWG and DXF requires a compatible redistributable DWG runtime, its integration and clean-machine testing. No pip command or PyInstaller flag adds that engine to this application. [Open Design Alliance, ODA File Converter][oda]; [PyInstaller, Operating mode][pyinstaller-mode]
+**DWG input, output and preview require ODA File Converter separately.** The current program therefore provides self-contained DXF operation, with an external dependency for DWG. A fully self-contained executable covering both DWG and DXF requires a compatible redistributable DWG runtime, its integration and clean-machine testing. No pip command or PyInstaller flag adds that engine to this application. [Open Design Alliance, ODA File Converter][oda]
 
 | Resource | Bundled content | Host requirement |
 | --- | --- | --- |
@@ -1093,7 +1143,7 @@ The build below is intended to produce a **single Windows executable with all Py
 
 Column key (left to right): Capability or resource; Included by the documented one-file build; Destination-computer requirement.
 
-One-file packaging describes delivery, not execution entirely inside the executable. PyInstaller extracts bundled resources into a temporary runtime directory and normally removes them when the application exits. This behaviour can affect startup time and the grid paths recorded in a report. [PyInstaller, Runtime information][pyinstaller-runtime]
+One-file packaging describes delivery, not execution entirely inside the executable. PyInstaller extracts bundled resources into a temporary runtime directory and normally removes them when the application exits. This behaviour can affect startup time and the grid paths recorded in a report.
 
 ### 11.2 Syntax verification and build-tool installation
 
@@ -1107,7 +1157,7 @@ python -m pip check
 python -m PyInstaller --version
 ```
 
-`py_compile` checks source syntax and writes bytecode in `__pycache__`. It does **not** produce a standalone executable, collect dependencies or exercise the GUI. PyInstaller supplies the packaging step. The hooks package provides additional third-party collection rules and should be installed together with the build tool. [Python Software Foundation, py_compile][python-compile]; [PyInstaller, Hooks][pyinstaller-hooks]
+`py_compile` checks source syntax and writes bytecode in `__pycache__`. It does **not** produce a standalone executable, collect dependencies or exercise the GUI. PyInstaller supplies the packaging step. The hooks package provides additional third-party collection rules and should be installed together with the build tool.
 
 Keep this environment limited to the application requirements. Broad collection of ezdxf modules can otherwise pull in optional backends that happen to be installed. A build log can mention unavailable optional drawing backends; investigate warnings affecting this program's Tk/Pillow/font/PROJ path rather than installing unrelated GUI frameworks merely to silence every optional-import warning.
 
@@ -1137,7 +1187,7 @@ python -m PyInstaller --noconfirm --clean --onefile ^
     script.py
 ```
 
-The output is **`dist\script.exe`**. Each quoted `--add-data` value uses `SOURCE:DESTINATION`; `.` places the grid at the bundled resource root. All four files must exist when building. Keep every caret at the end of its line without trailing spaces. [PyInstaller, Usage][pyinstaller-usage]
+The output is **`dist\script.exe`**. Each quoted `--add-data` value uses `SOURCE:DESTINATION`; `.` places the grid at the bundled resource root. All four files must exist when building. Keep every caret at the end of its line without trailing spaces.
 
 **Table 13. Build options and resource collection.**
 
@@ -1169,7 +1219,7 @@ The output is **`dist\script.exe`**. Each quoted `--add-data` value uses `SOURCE
 
 Column key (left to right): Option or mechanism; Purpose.
 
-Pillow's pip name is `Pillow`; its import and PyInstaller collection name is `PIL`. Similarly, pip installs `fonttools`, while collection uses `fontTools`. These names are intentional. Collection flags request the resources; the acceptance checks below establish whether a particular produced executable contains everything required on the target machine. [PyInstaller, Hooks][pyinstaller-hooks]
+Pillow's pip name is `Pillow`; its import and PyInstaller collection name is `PIL`. Similarly, pip installs `fonttools`, while collection uses `fontTools`. These names are intentional. Collection flags request the resources; the acceptance checks below establish whether a particular produced executable contains everything required on the target machine.
 
 ### 11.4 Embedded grids, overrides and deployment contents
 
@@ -1217,9 +1267,9 @@ python -m PyInstaller --version >> build-environment.txt
 certutil -hashfile dist\script.exe SHA256
 ```
 
-Retain the build files, Windows/Python architecture, package versions, executable hash and grid hashes with the release record. `pip freeze --all` records installed versions, including pip; it is an environment snapshot rather than a dependency solver's lockfile. It does not capture the interpreter installer, OS, external ODA installation, custom fonts or grid data. On a separate build machine, recreate and activate the environment, bootstrap pip, then run `python -m pip install -r build-requirements.txt` and supply the recorded grids before repeating the build. [pip, pip freeze][pip-freeze]
+Retain the build files, Windows/Python architecture, package versions, executable hash and grid hashes with the release record. `pip freeze --all` records installed versions, including pip; it is an environment snapshot rather than a dependency solver's lockfile. It does not capture the interpreter installer, OS, external ODA installation, custom fonts or grid data. On a separate build machine, recreate and activate the environment, bootstrap pip, then run `python -m pip install -r build-requirements.txt` and supply the recorded grids before repeating the build.
 
-The script isolates the external converter's library-search environment when launched from a frozen application, including restoration of the Windows DLL search directory. This is necessary because the bundled Python runtime and the external ODA process can require different libraries. [PyInstaller, Common issues][pyinstaller-pitfalls]
+The script isolates the external converter's library-search environment when launched from a frozen application, including restoration of the Windows DLL search directory. This is necessary because the bundled Python runtime and the external ODA process can require different libraries.
 
 | Acceptance check | Expected evidence |
 | --- | --- |
@@ -1264,9 +1314,11 @@ A default input `survey.dxf` produces the following file, according to the selec
 
 The report is named **`report_3763.json`**. Selecting another target changes the report name to `report_<target EPSG>.json`.
 
+A conversion that finishes after omitting unprocessable geometry is reported as **`completed_with_omissions`**. The output drawing contains the geometry that was successfully processed; it must not be interpreted as a complete reproduction of the source. The `omitted` counters and `entity_omitted` issues identify omissions by entity type, handle and reason. Keep the original drawing and the report with the converted output.
+
 Each run replaces the report for that target in the selected output folder, independently of the CAD overwrite setting. Archive the report elsewhere if separate run records are required. Existing CAD outputs are replaced only when overwrite is enabled. Output/input collisions and duplicate planned output names are rejected before processing.
 
-If a batch stops on an error or cancellation, completed drawings remain available. The report records the batch state and completed files when processing has started. An initial validation failure can occur before report creation. Detailed per-file entity counters describe completed drawings; the failed current drawing is identified through the error entry rather than a complete partially accumulated entity inventory.
+If a batch stops on an error or cancellation, completed drawings remain available. The report records the batch state and completed files when processing has started. An initial validation failure can occur before report creation. The `files` list describes completed drawings. When per-file processing has started, `failed_file` records the current drawing's collected counters, issues, handles and source archives. These are partial diagnostic data, not evidence that the failed drawing was fully transformed or published. The `error` entry identifies the failure and input path.
 
 ### 12.2 Report contents
 
@@ -1284,17 +1336,29 @@ If a batch stops on an error or cancellation, completed drawings remain availabl
 |  | internal version, datum identifiers, direction and |
 |  | bounds |
 | CAD processing | Transformed, approximated, local-affine, exploded |
-|  | and unresolved counters |
+|  | unresolved and omitted counters |
 | Entity issues | Severity, issue code, message, layout, entity type and |
 |  | handle |
 | Read/write | Input audit/recovery and output |
 | assurance | reopening/audit/count checks |
 | Failure/cancellation | Error type, message and current input path where |
 |  | available |
+| Failed drawing | Partial counters, issues, entity handles and source |
+| diagnostics | archives in `failed_file`, when available |
 
 For a local-grid chain, `accuracy_metres` is deliberately `null`. The script does not replace it with a guaranteed centimetre value or automatically insert DGT's validation RMSE. For generic PROJ chains, reported stage accuracy information is descriptive metadata; it is not the covariance propagation described in Section 7.1.
 
 After using the DGT files under the application aliases, look for the actual internal version **`IGP2011`** and the intended file hash. The name `pt73_e89.gsb` alone does not identify which set of binary corrections was used.
+
+Polyline-specific issue codes distinguish deliberate handling from an unexplained loss: `empty_polyline_omitted` identifies a zero-vertex lightweight polyline omitted by design; `empty_polyline_preserved` identifies an empty legacy polyline; `zero_length_bulge_cleared` identifies coincident vertices with an unusable bulge; `polyline_width_local` records local width/thickness treatment; and `polyline_representation_changed` identifies conversion to a 3D representation. The transformed counter `LWPOLYLINE_EMPTY_OMITTED` counts omitted empty objects; it does not count reprojected vertices. Inspect issue handles when reconciling the source and output drawings.
+
+For each fitted polyline materialized as an ordinary polyline, the completed file's `fitted_polyline_sources` list records its source and output handles, source EPSG, DXF version, fit flags, display/auxiliary vertex handles and original DXF tag text in `source_dxf`. The archived coordinates remain in the source CRS. Keep this report with the output drawing when the original fitting data is needed, and archive it before another run replaces `report_3763.json`. The associated issue code is `fitted_polyline_faceted`.
+
+Proxy replacements are recorded as `proxy_graphics_materialized`, with source data in `proxy_entity_sources`. Replacement handles identify native entities created during preparation; later faceting or block explosion may replace or copy them again. In the default mode, `entity_omitted` records unsupported proxy geometry and its removal from the processed output, with its handle and recovery guidance. Under strict mode, `proxy_unresolved` identifies the problem, the error shows the first issue, and `failed_file.issues` retains all issues collected before failure. A rejected composite may cause the containing INSERT to be recorded as omitted or unresolved.
+
+For omissions, `handle` identifies the object being processed, while `source_handle`, `source_entity_type` and `source_layout` identify its originating object in the input drawing. For a generated primitive this can be its parent INSERT, DIMENSION or proxy. The batch field `omitted_entity_count` sums omitted work-copy objects across published files; it is not a count of unique original handles or visible instances. For example, an unsupported member removed from a reused block definition is counted once, even if that definition has multiple insertions.
+
+For a proxy carrying plot-style, material or mapper commands, read the appearance notes in its `proxy_graphics_materialized` warning. They identify styling retained only in the source archive. The same warning identifies a proxy lineweight replaced with ByLayer when its saved value is outside the supported range. A successful geometric conversion does not certify identical plot styles or photorealistic rendering.
 
 ### 12.3 Temporary files and cancellation
 
@@ -1343,9 +1407,17 @@ Cancellation is checked between processing steps and entities. Some expensive op
 |  | enable overwrite |
 | Two drawings create one | Rename one input or process them |
 | output name | separately |
-| Strict mode stops a | Inspect the reported composite condition; |
-| block/dimension | unsupported content cannot be assumed |
-|  | converted |
+| Strict mode stops a | Clear the strict option to finish with |
+| block/dimension | reported omissions, or repair the object |
+|  | in the authoring application |
+| Proxy object cannot be | Default processing omits it and continues. |
+| converted | Inspect `proxy_unresolved`, `entity_omitted` |
+|  | and the handle; export standard entities |
+|  | from its authoring application to recover it |
+| Proxy lineweight is outside | A valid geometry snapshot uses ByLayer |
+| the supported range | and reports the appearance substitution |
+| Conversion completes with | Inspect `omitted` counts and issues; |
+| omissions | compare with the unchanged source drawing |
 | Dimension text differs from a | Rendered text was transformed, not |
 | measured target length | recalculated as a target-system |
 |  | measurement |
@@ -1367,7 +1439,7 @@ The principal geodetic decision is the correct identification of the source syst
 
 Grid transformations represent spatially varying datum differences that a single national translation or similarity transformation cannot fully describe. Their usefulness depends on the quality and coverage of the underlying observations, not simply on file size. Recording the grid's version and hash makes a transformation reproducible and permits later comparison with independent control.
 
-CAD introduces a second problem beyond geodesy: the target geometry may not belong to the same analytical or parametric object class as the source. The application addresses this through explicit geometric strategies and records approximations and unresolved conditions. It does not claim universal exact preservation of every proprietary object, embedded coordinate payload or associative editing relationship.
+CAD introduces a second problem beyond geodesy: the target geometry may not belong to the same analytical or parametric object class as the source. The application addresses this through explicit geometric strategies and records approximations, unresolved conditions and omissions. Its default best-effort policy completes processable geometry while omitting objects that cannot be transformed safely; strict mode is available when identified omissions must prevent publication. It does not claim universal exact preservation of every proprietary object, embedded coordinate payload or associative editing relationship.
 
 A defensible project deliverable combines three forms of evidence: a documented coordinate-operation chain, independent agreement with suitable control points, and inspection of the CAD objects that carry engineering meaning. The JSON report supports the first and records structural processing information; the remaining evidence comes from the project's survey and CAD review.
 
@@ -1433,32 +1505,6 @@ Titles of Portuguese-language resources are translated into English below. Insti
 
 26. **Open Design Alliance.** n.d. [ODA File Converter][oda]. Product and download documentation, including supported command-line conversion inputs.
 
-### 14.4 Python environment and executable packaging
-
-27. **Python Software Foundation.** n.d. [venv—Creation of virtual environments][python-venv]. Python standard-library documentation. Environment isolation, direct interpreter invocation and platform-specific activation.
-
-28. **Python Software Foundation.** n.d. [py_compile—Compile Python source files][python-compile]. Python standard-library documentation. Bytecode compilation and syntax checking.
-
-29. **PyInstaller development team.** n.d. [Using PyInstaller][pyinstaller-usage]. Build options, one-file/windowed execution and collection of package resources.
-
-30. **PyInstaller development team.** n.d. [Runtime information][pyinstaller-runtime]. Resource locations, `sys.frozen`, `sys._MEIPASS` and bundled data-file handling.
-
-31. **PyInstaller development team.** n.d. [Common issues and pitfalls][pyinstaller-pitfalls]. In particular, launching external programs from frozen applications and library-search-path isolation.
-
-32. **Pillow contributors.** n.d. [Basic installation][pillow-install]. Pillow installation, supported binary distributions and the distinction between the `Pillow` distribution and `PIL` import namespace.
-
-33. **ezdxf contributors.** n.d. [Setup and dependencies][ezdxf-setup]. Core installation requirements and optional extras for drawing backends. Application-specific preview requirements were also checked against the installed ezdxf 1.4.4 frontend.
-
-34. **Python Software Foundation.** n.d. [ensurepip—Bootstrapping the pip installer][python-ensurepip]. Bootstrapping pip from bundled components and the scope of its upgrade option.
-
-35. **pip contributors.** n.d. [Installation][pip-installation]. Supported pip installation and upgrade procedures.
-
-36. **PyInstaller development team.** n.d. [How the One-File Program Works][pyinstaller-mode]. Runtime extraction and the relationship between packaged application resources and the host operating system.
-
-37. **PyInstaller development team.** n.d. [Understanding PyInstaller Hooks][pyinstaller-hooks]. Analysis hooks, package data, native libraries and the role of `pyinstaller-hooks-contrib`.
-
-38. **pip contributors.** n.d. [pip freeze][pip-freeze]. Recording installed package versions in requirements format and the distinction between an environment snapshot and a solver lockfile.
-
 [dgt-systems]: https://www.dgterritorio.gov.pt/atividades/geodesia/sistemas-referencia
 [dgt-tm06]: https://www.dgterritorio.gov.pt/atividades/geodesia/sistemas-referencia/portugal-continental/PT-TM06-ETRS89
 [dgt-transform]: https://www.dgterritorio.gov.pt/atividades/geodesia/transformacao-coordenadas/portugal-continental
@@ -1485,15 +1531,3 @@ Titles of Portuguese-language resources are translated into English below. Insti
 [pyproj-transformer]: https://pyproj4.github.io/pyproj/stable/api/transformer.html
 [ezdxf-oda]: https://ezdxf.readthedocs.io/en/stable/addons/odafc.html
 [oda]: https://www.opendesign.com/guestfiles/oda_file_converter
-[python-venv]: https://docs.python.org/3/library/venv.html
-[python-compile]: https://docs.python.org/3/library/py_compile.html
-[pyinstaller-usage]: https://pyinstaller.org/en/stable/usage.html
-[pyinstaller-runtime]: https://pyinstaller.org/en/stable/runtime-information.html
-[pyinstaller-pitfalls]: https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#launching-external-programs-from-the-frozen-application
-[pillow-install]: https://pillow.readthedocs.io/en/stable/installation/basic-installation.html
-[ezdxf-setup]: https://ezdxf.readthedocs.io/en/stable/setup.html
-[python-ensurepip]: https://docs.python.org/3/library/ensurepip.html
-[pip-installation]: https://pip.pypa.io/en/stable/installation/
-[pyinstaller-mode]: https://pyinstaller.org/en/stable/operating-mode.html#how-the-one-file-program-works
-[pyinstaller-hooks]: https://pyinstaller.org/en/stable/hooks.html
-[pip-freeze]: https://pip.pypa.io/en/stable/cli/pip_freeze/

@@ -41,11 +41,49 @@ accuracy or a global target-space error bound. Straight segments join the
 transformed vertices. Block references and dimensions are exploded to transform
 their displayed geometry; their original editing semantics are not retained.
 
+Ordinary 2D polylines use their actual CAD closed flag, not endpoint proximity.
+Single, coincident and very short vertices are retained. Planar polylines keep
+their native entities and handles; circular bulges are sampled from their signed
+sweep and radius. Widths remain in drawing units and interpolate along faceted
+arcs; thickness uses a local mapping. These are not exact reprojections of the
+full width/thickness envelope. A non-horizontal result carrying width or
+thickness cannot be represented and follows the failed-object policy. Empty LWPOLYLINE
+objects have no vertices and the DXF writer cannot serialize them; their omission
+is explicitly reported. Empty legacy POLYLINE objects are retained. Each bulged
+arc is limited to 1,000,000 facets; an excessive request rejects that object.
+
+Fitted legacy polylines containing bulges are converted from their stored display
+vertices to ordinary faceted polylines before reprojection. Spline-frame control
+vertices are not connected as visible geometry. The original entity/vertex tags
+are recorded in fitted_polyline_sources in the JSON report, including the source
+EPSG and handles. Keep that report with the drawing; fit/tangent editing semantics
+are not retained in the converted polyline. Fitted polylines without bulges use
+the reported local affine approximation.
+
+ACAD_PROXY_ENTITY objects are read-only proprietary objects. Supported saved
+proxy graphics are decoded to native display entities before reprojection;
+reachable block definitions are prepared before their INSERTs are exploded.
+Original proxy tags are recorded in proxy_entity_sources in the JSON report.
+Plot-style, material and texture-mapping commands are appearance metadata:
+their original payloads are archived and any unrepresented styling is reported.
+Native parent plot-style/material references are retained on replacement entities.
+This preserves a display representation, not the custom object's editing logic
+or opaque application coordinates. Valid negative lineweights (ByLayer, ByBlock
+and Default) are preserved. Unsupported lineweights use ByLayer and are reported
+as appearance warnings. Missing, corrupt or unsupported proxy geometry follows
+the failed-object policy below.
+
 Objects exposing only an affine transformation use a local Jacobian at an
-anchor point and are explicitly recorded as approximations. Unsupported
-geometry is recorded as unresolved. Strict mode stops publication of that
-drawing if unresolved geometry remains. A failed handler that may have partially
-changed an object always stops publication, including in non-strict mode.
+anchor point and are explicitly recorded as approximations. By default, objects
+that cannot be transformed are omitted, their partial replacements are removed,
+and conversion continues. The report records omitted types, handles and reasons;
+keep the unchanged source drawing to recover those objects. A failure affecting
+a complete INSERT or DIMENSION can omit that entire reference. Strict mode is
+optional in Advanced settings or with --strict and prevents publication when
+an object cannot be converted. Cancellation, required grid/coordinate-operation
+failures, incomplete cleanup and file read/write/verification errors still stop
+the drawing conversion. Successful output with omissions is explicitly marked
+completed_with_omissions in the report and in the GUI completion message.
 Nonlinear reprojection cannot guarantee
 exact preservation of every proprietary CAD object, constraint or payload.
 Raster images, underlays and OLE contents are not warped. Paper-space geometry
@@ -72,6 +110,8 @@ GUI usage
    The output folder also receives report_3763.json; other targets use
    report_<target EPSG>.json. The report describes completed files, operations,
    grids, approximations and any batch failure. Each run replaces that report.
+   For a failed drawing, failed_file includes collected entity issues and source
+   archives when processing reached that stage; it is not a completed output.
    Existing CAD outputs require the explicit overwrite setting. If a batch
    stops, drawings already completed remain in the output folder.
 
@@ -88,7 +128,7 @@ in the current shell. Use python -m pip after activation so installations belong
 to that environment. The caret continues a Command Prompt command; put no spaces
 after a line-ending caret.
 
-    py -m venv .venv
+    py -3.12 -m venv .venv
     call .venv\Scripts\activate.bat
     python -m ensurepip --upgrade
     python -m pip install --upgrade pip setuptools wheel
@@ -307,6 +347,12 @@ else:
 class ConversionError(RuntimeError):
     """A conversion error that can be shown directly to the user."""
 
+    def __init__(
+        self, message: str, *, file_result: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.file_result = file_result
+
 
 class CancelledError(ConversionError):
     """Raised after a cooperative cancellation request."""
@@ -343,7 +389,7 @@ class ConversionJob:
     curve_tolerance: float = DEFAULT_CURVE_TOLERANCE
     preserve_z: bool = True
     transform_paper_space: bool = False
-    strict_unresolved: bool = True
+    strict_unresolved: bool = False
     allow_ballpark: bool = False
     overwrite: bool = False
     audit_and_recover: bool = True
@@ -360,6 +406,9 @@ class EntityIssue:
     layout: str
     entity_type: str
     handle: str
+    source_handle: str = ""
+    source_entity_type: str = ""
+    source_layout: str = ""
 
 
 @dataclass
@@ -373,7 +422,10 @@ class FileResult:
     local_affine: Counter[str] = field(default_factory=Counter)
     exploded: Counter[str] = field(default_factory=Counter)
     unresolved: Counter[str] = field(default_factory=Counter)
+    omitted: Counter[str] = field(default_factory=Counter)
     issues: list[EntityIssue] = field(default_factory=list)
+    fitted_polyline_sources: list[dict[str, Any]] = field(default_factory=list)
+    proxy_entity_sources: list[dict[str, Any]] = field(default_factory=list)
 
     def add_issue(self, severity: str, code: str, message: str, entity: Any) -> None:
         layout = entity.get_layout()
@@ -396,6 +448,7 @@ class FileResult:
             "local_affine",
             "exploded",
             "unresolved",
+            "omitted",
         ):
             data[key] = dict(sorted(getattr(self, key).items()))
         return data
@@ -848,6 +901,8 @@ def _graphic_attributes(entity: Any) -> dict[str, Any]:
         "color_name",
         "transparency",
         "material_handle",
+        "plotstyle_enum",
+        "plotstyle_handle",
     ):
         if entity.dxf.hasattr(name):
             attributes[name] = entity.dxf.get(name)
@@ -1153,6 +1208,670 @@ def build_coordinate_operation(
     return operation
 
 
+def _decode_proxy_graphics(
+    entity: Any, cancel: CancellationToken
+) -> tuple[list[Any], list[str], list[str]]:
+    """Decode complete supported proxy display geometry without silent skips.
+
+    The application-specific object remains archived by the caller. This function
+    yields ordinary source-coordinate CAD graphics, not a native custom object.
+    """
+    import math
+    import struct
+
+    from ezdxf.entities import factory
+    from ezdxf.lldxf.validator import is_valid_lineweight
+    from ezdxf.math import OCS
+    from ezdxf.proxygraphic import ProxyGraphic, ProxyGraphicTypes
+    from ezdxf.tools.binarydata import BitStream, ByteStream
+
+    data = entity.proxy_graphic
+    if not data or len(data) <= 8:
+        raise ConversionError(
+            "The proxy has no saved display geometry. Open it with its originating CAD application/object enabler and export ordinary CAD entities with proxy graphics enabled."
+        )
+    decoder = ProxyGraphic(data, doc=entity.doc)
+    explicit_lineweight = entity.dxf.hasattr("lineweight")
+    for name in ("layer", "color", "linetype", "lineweight", "ltscale", "true_color"):
+        if entity.dxf.hasattr(name):
+            setattr(decoder, name, entity.dxf.get(name))
+    supported = {
+        "EXTENTS",
+        "CIRCLE",
+        "CIRCLE_3P",
+        "CIRCULAR_ARC",
+        "CIRCULAR_ARC_3P",
+        "POLYLINE",
+        "POLYGON",
+        "MESH",
+        "SHELL",
+        "TEXT",
+        "TEXT2",
+        "XLINE",
+        "RAY",
+        "ATTRIBUTE_COLOR",
+        "ATTRIBUTE_LAYER",
+        "ATTRIBUTE_LINETYPE",
+        "ATTRIBUTE_MARKER",
+        "ATTRIBUTE_FILL",
+        "ATTRIBUTE_TRUE_COLOR",
+        "ATTRIBUTE_LINEWEIGHT",
+        "ATTRIBUTE_LTSCALE",
+        "ATTRIBUTE_THICKNESS",
+        "ATTRIBUTE_PLOT_STYLE_NAME",
+        "ATTRIBUTE_MATERIAL",
+        "ATTRIBUTE_MAPPER",
+        "PUSH_MATRIX",
+        "POP_MATRIX",
+        "POLYLINE_WITH_NORMALS",
+        "LWPOLYLINE",
+        "UNICODE_TEXT",
+        "UNICODE_TEXT2",
+        "ELLIPTIC_ARC",
+    }
+    chunks = []
+    offset = 8
+    while offset < len(data):
+        cancel.check()
+        if len(data) - offset < 8:
+            raise ConversionError(f"Truncated proxy command header at byte {offset}.")
+        size, opcode = struct.unpack_from("<2L", data, offset)
+        if size < 8 or size > len(data) - offset:
+            raise ConversionError(
+                f"Invalid proxy command length {size} at byte {offset}."
+            )
+        try:
+            name = ProxyGraphicTypes(opcode).name
+        except ValueError as exc:
+            raise ConversionError(
+                f"Unsupported proxy command {opcode} at byte {offset}."
+            ) from exc
+        if name not in supported:
+            raise ConversionError(
+                f"Unsupported proxy command {name} at byte {offset}; its geometry cannot be safely omitted."
+            )
+        chunks.append((offset, name, data[offset + 8 : offset + size]))
+        offset += size
+    graphics = []
+    notes = []
+    matrices = []
+
+    def finite(values, what):
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ConversionError(f"Non-finite {what} in proxy display geometry.")
+
+    def exact_length(payload, length, name):
+        if len(payload) != length:
+            raise ConversionError(
+                f"Proxy {name} requires {length} payload bytes; found {len(payload)}."
+            )
+
+    def end_of_record(stream, name):
+        if stream.index != len(stream.buffer):
+            raise ConversionError(
+                f"Proxy {name} contains missing or undecoded payload bytes."
+            )
+
+    def read_points(stream, count):
+        if count < 0 or count > (len(stream.buffer) - stream.index) // 24:
+            raise ConversionError("Proxy vertex count exceeds its payload.")
+        points = []
+        for index in range(count):
+            if index % 256 == 0:
+                cancel.check()
+            point = Vec3(stream.read_vertex())
+            finite(point, "vertex")
+            points.append(point)
+        return points
+
+    def polyline(points, closed=False):
+        if not points:
+            raise ConversionError("A proxy polyline contains no display vertices.")
+        # Source coordinates are WCS: a 3D polyline preserves elevation, tiny
+        # segments, exact repeated vertices and explicit closure without OCS guesses.
+        result = factory.new(
+            "POLYLINE", dxfattribs={**decoder._build_dxf_attribs(), "flags": 8}
+        )
+        result.append_vertices(points)
+        result.close(closed)
+        result.new_seqend()
+        return result
+
+    def strict_string(stream, unicode=False):
+        start = stream.index
+        step = 2 if unicode else 1
+        terminator = b"\0\0" if unicode else b"\0"
+        raw = bytes(stream.buffer)
+        for end in range(start, len(raw) - step + 1, step):
+            if raw[end : end + step] == terminator:
+                result = raw[start:end].decode(
+                    "utf-16-le" if unicode else decoder.encoding, errors="strict"
+                )
+                stream.index = stream.align(end + step)
+                if stream.index > len(raw):
+                    raise ConversionError("Proxy text is missing its padding bytes.")
+                return result
+        raise ConversionError("Proxy text is missing a string terminator.")
+
+    def text_graphic(payload, name):
+        stream = ByteStream(payload)
+        position, normal, direction = read_points(stream, 3)
+        if normal.magnitude == 0 or direction.magnitude == 0:
+            raise ConversionError("Proxy text contains a zero direction vector.")
+        unicode = name.startswith("UNICODE")
+        extended = name.endswith("2")
+        if extended:
+            text = strict_string(stream, unicode)
+            stream.read_struct("<2l")  # stored string length and formatting field
+            height, width, oblique, tracking = stream.read_struct("<4d")
+            backward, upside_down, vertical, underline, overline = stream.read_struct(
+                "<5L"
+            )
+            if unicode:
+                bold, italic, _charset, _pitch = stream.read_struct("<4L")
+                typeface = strict_string(stream, True)
+                if bold or italic or typeface:
+                    notes.append(
+                        "Proxy text font face/weight is represented by its stored font file; exact typography depends on installed fonts."
+                    )
+            font = strict_string(stream, unicode)
+            bigfont = strict_string(stream, unicode)
+            if vertical or underline or overline or tracking not in (0.0, 1.0, 100.0):
+                raise ConversionError(
+                    "Proxy text uses vertical, decorated or tracked formatting that cannot be represented completely as ordinary TEXT."
+                )
+        else:
+            height, width, oblique = stream.read_struct("<3d")
+            text = strict_string(stream, unicode)
+            backward = upside_down = 0
+            font = bigfont = ""
+        end_of_record(stream, name)
+        finite((height, width, oblique), "text dimensions")
+        if height <= 0 or width <= 0:
+            raise ConversionError("Proxy text has non-positive height or width.")
+        normal = normal.normalize()
+        direction = direction.normalize()
+        if abs(normal.dot(direction)) > 1e-8:
+            raise ConversionError(
+                "Proxy text baseline is not perpendicular to its normal."
+            )
+        ocs = OCS(normal)
+        attributes = decoder._build_dxf_attribs()
+        attributes.update(
+            insert=ocs.from_wcs(position),
+            extrusion=normal,
+            text=text,
+            height=height,
+            width=width,
+            oblique=math.degrees(oblique),
+            rotation=ocs.from_wcs(direction).angle_deg,
+            text_generation_flag=2 * bool(backward) + 4 * bool(upside_down),
+        )
+        if font:
+            attributes["style"] = decoder._get_style(font, bigfont)
+        return factory.new("TEXT", dxfattribs=attributes)
+
+    def lightweight_polyline(payload):
+        stream = BitStream(payload, dxfversion=decoder.dxfversion)
+        stream.read_unsigned_long()  # encoded payload metadata (format dependent)
+        flags = stream.read_bit_short()
+        if flags & ~(1 | 2 | 4 | 8 | 16 | 32 | 512 | 1024):
+            raise ConversionError("Proxy LWPOLYLINE has unsupported flags.")
+        attributes = decoder._build_dxf_attribs()
+        for bit, key in ((4, "const_width"), (8, "elevation"), (2, "thickness")):
+            if flags & bit:
+                attributes[key] = stream.read_bit_double()
+        if flags & 1:
+            attributes["extrusion"] = Vec3(stream.read_bit_double(3))
+        if attributes.get("thickness", 0):
+            raise ConversionError(
+                "Proxy LWPOLYLINE thickness requires native CAD conversion."
+            )
+        count = stream.read_bit_long()
+        if count <= 0 or count > len(payload) * 8:
+            raise ConversionError("Invalid proxy LWPOLYLINE vertex count.")
+        bulge_count = stream.read_bit_long() if flags & 16 else 0
+        ids_count = width_count = 0
+        if decoder.dxfversion >= "AC1024":
+            ids_count = stream.read_bit_long() if flags & 1024 else 0
+            width_count = stream.read_bit_long() if flags & 32 else 0
+        elif flags & (32 | 1024):
+            raise ConversionError(
+                "Unsupported legacy proxy LWPOLYLINE width/vertex-ID encoding."
+            )
+        if any(
+            value not in (0, count) for value in (bulge_count, ids_count, width_count)
+        ):
+            raise ConversionError(
+                "Proxy LWPOLYLINE bulge, width or vertex-ID count differs from its vertex count."
+            )
+        vertices = [tuple(stream.read_raw_double(2))]
+        for index in range(1, count):
+            if index % 256 == 0:
+                cancel.check()
+            x = stream.read_bit_double_default(default=vertices[-1][0])
+            y = stream.read_bit_double_default(default=vertices[-1][1])
+            vertices.append((x, y))
+        bulges = (
+            [stream.read_bit_double() for _ in range(bulge_count)]
+            if bulge_count
+            else [0.0] * count
+        )
+        for _ in range(ids_count):
+            stream.read_bit_long()
+        widths = (
+            [
+                (stream.read_bit_double(), stream.read_bit_double())
+                for _ in range(width_count)
+            ]
+            if width_count
+            else [(0.0, 0.0)] * count
+        )
+        if (
+            stream.bit_index > len(payload) * 8
+            or len(payload) * 8 - stream.bit_index >= 32
+        ):
+            raise ConversionError("Proxy LWPOLYLINE has missing or undecoded data.")
+        rows = [
+            (x, y, sw, ew, bulge)
+            for (x, y), (sw, ew), bulge in zip(vertices, widths, bulges, strict=True)
+        ]
+        for row in rows:
+            finite(row, "polyline coordinates/widths/bulges")
+        for key in ("const_width", "elevation", "thickness"):
+            if key in attributes:
+                finite((attributes[key],), "polyline attributes")
+        normal = Vec3(attributes.get("extrusion", (0, 0, 1)))
+        finite(normal, "polyline normal")
+        if normal.magnitude == 0:
+            raise ConversionError("Proxy LWPOLYLINE has a zero normal.")
+        result = factory.new("LWPOLYLINE", dxfattribs=attributes)
+        result.set_points(rows)
+        result.closed = bool(flags & 512)
+        if ids_count:
+            notes.append(
+                "Proxy polyline display vertex identifiers are stored in the source archive; output vertices retain their geometry."
+            )
+        return result
+
+    for offset, name, payload in chunks:
+        cancel.check()
+        try:
+            result = None
+            if name == "EXTENTS":
+                exact_length(payload, 48, name)
+                finite(struct.unpack("<6d", payload), "extents")
+            elif name == "PUSH_MATRIX":
+                exact_length(payload, 128, name)
+                values = struct.unpack("<16d", payload)
+                finite(values, "matrix")
+                if matrices:
+                    raise ConversionError(
+                        "Nested proxy transformation matrices require native CAD conversion."
+                    )
+                matrix = Matrix44(values)
+                matrix.transpose()
+                if (
+                    any(abs(matrix[index, 3]) > 1e-12 for index in range(3))
+                    or abs(matrix[3, 3] - 1.0) > 1e-12
+                ):
+                    raise ConversionError("A proxy uses a projective display matrix.")
+                matrices.append(matrix)
+            elif name == "POP_MATRIX":
+                exact_length(payload, 0, name)
+                if not matrices:
+                    raise ConversionError("Unmatched POP_MATRIX in proxy graphics.")
+                matrices.pop()
+            elif name in {
+                "ATTRIBUTE_PLOT_STYLE_NAME",
+                "ATTRIBUTE_MATERIAL",
+                "ATTRIBUTE_MAPPER",
+            }:
+                # ODA DWG specification, chapter 29: these commands set display
+                # traits, not coordinates or the geometry transformation matrix.
+                # Their full bytes remain in the caller's original DXF archive.
+                # Do not reinterpret a proxy resource index as a native DXF handle.
+                if name == "ATTRIBUTE_PLOT_STYLE_NAME":
+                    exact_length(payload, 8, name)
+                    style_type, _style_index = struct.unpack("<2L", payload)
+                    if style_type not in (0, 1, 2, 3):
+                        raise ConversionError(
+                            f"Proxy plot-style type {style_type} is not supported."
+                        )
+                    notes.append(
+                        "Proxy ATTRIBUTE_PLOT_STYLE_NAME is archived as appearance "
+                        "metadata. Native parent plot-style references are retained; "
+                        "per-primitive proxy print styling may differ."
+                    )
+                elif name == "ATTRIBUTE_MAPPER":
+                    exact_length(payload, 28, name)
+                    notes.append(
+                        "Proxy ATTRIBUTE_MAPPER is archived as appearance metadata. "
+                        "Its texture-mapping settings are not applied to replacement "
+                        "entities; rendered textures may differ."
+                    )
+                else:
+                    # The embedded material reference is opaque. Only its command
+                    # framing is interpreted; material resources are not rebuilt.
+                    notes.append(
+                        "Proxy ATTRIBUTE_MATERIAL is archived as appearance metadata. "
+                        "Native parent material references are retained; "
+                        "per-primitive proxy rendering may differ."
+                    )
+            elif name.startswith("ATTRIBUTE_"):
+                exact_length(
+                    payload,
+                    8 if name in {"ATTRIBUTE_LTSCALE", "ATTRIBUTE_THICKNESS"} else 4,
+                    name,
+                )
+                if name == "ATTRIBUTE_LAYER":
+                    index = struct.unpack("<L", payload)[0]
+                    if index >= len(decoder.layers):
+                        raise ConversionError(
+                            "Proxy layer index is outside the drawing layer table."
+                        )
+                elif name == "ATTRIBUTE_LINETYPE":
+                    index = struct.unpack("<L", payload)[0]
+                    # ODA documents 32-bit unsigned sentinels. ezdxf's decoder
+                    # recognizes the equivalent legacy 15-bit values instead.
+                    if index in (0xFFFFFFFE, 0xFFFFFFFF):
+                        index = 32766 if index == 0xFFFFFFFE else 32767
+                        payload = struct.pack("<L", index)
+                    if index not in (32766, 32767) and index + 2 >= len(
+                        decoder.linetypes
+                    ):
+                        raise ConversionError(
+                            "Proxy linetype index is outside the drawing linetype table."
+                        )
+                elif name == "ATTRIBUTE_THICKNESS":
+                    thickness = struct.unpack("<d", payload)[0]
+                    finite((thickness,), "thickness")
+                    if thickness != 0:
+                        raise ConversionError(
+                            "Non-zero proxy display thickness requires native CAD conversion."
+                        )
+                elif name == "ATTRIBUTE_LTSCALE":
+                    scale = struct.unpack("<d", payload)[0]
+                    finite((scale,), "linetype scale")
+                    if scale <= 0:
+                        raise ConversionError("Proxy linetype scale must be positive.")
+                elif (
+                    name == "ATTRIBUTE_COLOR" and struct.unpack("<L", payload)[0] > 256
+                ):
+                    raise ConversionError(
+                        "Proxy indexed colour is outside the supported CAD range."
+                    )
+                if name == "ATTRIBUTE_LINEWEIGHT":
+                    explicit_lineweight = True
+                    # Negative values are legitimate signed 32-bit traits:
+                    # -1 = ByLayer, -2 = ByBlock, -3 = drawing default. The
+                    # positive-only VALID_DXF_LINEWEIGHTS table omits them.
+                    weight = struct.unpack("<i", payload)[0]
+                    if not is_valid_lineweight(weight):
+                        notes.append(
+                            f"Proxy lineweight {weight} at byte {offset} is not a "
+                            "supported CAD lineweight. ByLayer is used for subsequent "
+                            "geometry; the original appearance value remains in the "
+                            "source archive. Coordinates are unaffected."
+                        )
+                        payload = struct.pack("<i", -1)
+                getattr(decoder, name.lower())(payload)
+            elif name in {"POLYLINE", "POLYLINE_WITH_NORMALS", "POLYGON"}:
+                stream = ByteStream(payload)
+                points = read_points(stream, stream.read_long())
+                if name == "POLYLINE_WITH_NORMALS":
+                    normal = read_points(stream, 1)[0]
+                    if normal.magnitude == 0:
+                        raise ConversionError("Proxy polyline has a zero normal.")
+                    notes.append(
+                        "Proxy polyline vertices are retained in WCS; its auxiliary normal is stored in the source archive."
+                    )
+                end_of_record(stream, name)
+                if name == "POLYGON" and decoder.fill:
+                    if (
+                        len(points) < 3
+                        or max(p.z for p in points) - min(p.z for p in points) > 1e-10
+                    ):
+                        raise ConversionError(
+                            "A filled proxy polygon is degenerate or not horizontal."
+                        )
+                    result = decoder._filled_polygon(
+                        points, decoder._build_dxf_attribs()
+                    )
+                else:
+                    result = polyline(points, closed=name == "POLYGON")
+            elif name == "LWPOLYLINE":
+                result = lightweight_polyline(payload)
+            elif name in {"TEXT", "TEXT2", "UNICODE_TEXT", "UNICODE_TEXT2"}:
+                result = text_graphic(payload, name)
+            elif name in {"MESH", "SHELL"}:
+                stream = ByteStream(payload)
+                attributes = decoder._build_dxf_attribs()
+                if name == "MESH":
+                    rows, columns = stream.read_struct("<2L")
+                    if rows < 2 or columns < 2:
+                        raise ConversionError(
+                            "Proxy mesh has invalid row/column counts."
+                        )
+                    points = read_points(stream, rows * columns)
+                    result = factory.new(
+                        "POLYLINE",
+                        dxfattribs={
+                            **attributes,
+                            "flags": 16,
+                            "m_count": rows,
+                            "n_count": columns,
+                        },
+                    )
+                    result.append_vertices(points)
+                else:
+                    points = read_points(stream, stream.read_long())
+                    entry_count = stream.read_long()
+                    if entry_count > (len(payload) - stream.index) // 4:
+                        raise ConversionError(
+                            "Proxy shell face count exceeds the payload."
+                        )
+                    consumed = 0
+                    faces = []
+                    while consumed < entry_count:
+                        cancel.check()
+                        count = stream.read_signed_long()
+                        if count not in (3, 4) or count > entry_count - consumed - 1:
+                            raise ConversionError(
+                                "Proxy shell requires triangular/quadrilateral faces without holes."
+                            )
+                        indices = [stream.read_long() for _ in range(count)]
+                        if any(index >= len(points) for index in indices):
+                            raise ConversionError(
+                                "Proxy shell face references a missing vertex."
+                            )
+                        faces.append(indices)
+                        consumed += count + 1
+                    if not faces:
+                        raise ConversionError("Proxy shell has no faces.")
+                    result = factory.new(
+                        "POLYLINE", dxfattribs={**attributes, "flags": 64}
+                    )
+                    # append_faces() merges positions rounded to six decimals.
+                    # Keep the source indices and every vertex, including tiny
+                    # or intentionally coincident mesh features.
+                    result.append_vertices(points, dxfattribs={"flags": 192})
+                    for indices in faces:
+                        face_attributes = {"flags": 128}
+                        face_attributes.update(
+                            {
+                                f"vtx{index}": value + 1
+                                for index, value in enumerate(indices)
+                            }
+                        )
+                        result.append_vertex((0, 0, 0), dxfattribs=face_attributes)
+                        # append_vertex() adds the parent mesh's coordinate
+                        # flags; a face record must contain indices only.
+                        result.vertices[-1].dxf.flags = 128
+                    result.update_count(len(points), len(faces))
+                trailing = payload[stream.index :]
+                if trailing and (len(trailing) not in (8, 12) or any(trailing)):
+                    raise ConversionError(
+                        "Proxy mesh/shell has unsupported per-face/per-edge traits or corrupt trailing data."
+                    )
+            else:
+                sizes = {
+                    "CIRCLE": (56,),
+                    "CIRCLE_3P": (72,),
+                    "CIRCULAR_ARC": (88, 92),
+                    "CIRCULAR_ARC_3P": (72, 76),
+                    "ELLIPTIC_ARC": (88,),
+                    "XLINE": (48,),
+                    "RAY": (48,),
+                }
+                if len(payload) not in sizes[name]:
+                    raise ConversionError(
+                        f"Proxy {name} has an unexpected payload length."
+                    )
+                numeric_bytes = (
+                    len(payload) - 4 if len(payload) in (76, 92) else len(payload)
+                )
+                values = struct.unpack(
+                    f"<{numeric_bytes // 8}d", payload[:numeric_bytes]
+                )
+                finite(values, name)
+                if (
+                    len(payload) in (76, 92)
+                    and struct.unpack("<L", payload[-4:])[0] != 0
+                ):
+                    raise ConversionError(
+                        "The proxy arc uses an unsupported arc-type flag."
+                    )
+                if name == "CIRCULAR_ARC":
+                    center = Vec3(values[:3])
+                    radius = values[3]
+                    normal = Vec3(values[4:7])
+                    direction = Vec3(values[7:10])
+                    sweep = values[10]
+                    if radius <= 0 or normal.magnitude == 0 or direction.magnitude == 0:
+                        raise ConversionError(
+                            "Proxy arc radius or direction is invalid."
+                        )
+                    if sweep == 0 or abs(sweep) > math.tau + 1e-12:
+                        raise ConversionError(
+                            "Proxy arc sweep is zero or exceeds a full circle."
+                        )
+                    normal = normal.normalize()
+                    direction = direction.normalize()
+                    if abs(normal.dot(direction)) > 1e-8:
+                        raise ConversionError(
+                            "Proxy arc start direction is not in its plane."
+                        )
+                    if sweep < 0:
+                        normal = -normal
+                    ocs = OCS(normal)
+                    attributes = decoder._build_dxf_attribs()
+                    attributes.update(
+                        center=ocs.from_wcs(center), radius=radius, extrusion=normal
+                    )
+                    if abs(abs(sweep) - math.tau) <= 1e-12:
+                        result = factory.new("CIRCLE", dxfattribs=attributes)
+                    else:
+                        start_angle = ocs.from_wcs(direction).angle_deg
+                        attributes.update(
+                            start_angle=start_angle,
+                            end_angle=start_angle + math.degrees(abs(sweep)),
+                        )
+                        result = factory.new("ARC", dxfattribs=attributes)
+                elif name in {"CIRCLE_3P", "CIRCULAR_ARC_3P"}:
+                    points = [Vec3(values[index : index + 3]) for index in (0, 3, 6)]
+                    if max(p.z for p in points) - min(p.z for p in points) > 1e-10:
+                        raise ConversionError(
+                            "A tilted three-point proxy arc/circle requires native CAD conversion."
+                        )
+                    result = getattr(decoder, name.lower())(payload)
+                    result.dxf.center = Vec3(
+                        result.dxf.center.x, result.dxf.center.y, points[0].z
+                    )
+                    if name == "CIRCULAR_ARC_3P":
+                        winding = (points[1] - points[0]).cross(points[2] - points[0]).z
+                        if winding == 0:
+                            raise ConversionError(
+                                "Proxy three-point arc points are collinear."
+                            )
+                        normal = Vec3(0, 0, 1 if winding > 0 else -1)
+                        ocs = OCS(normal)
+                        center = result.dxf.center
+                        result.dxf.center = ocs.from_wcs(center)
+                        result.dxf.extrusion = normal
+                        result.dxf.start_angle = ocs.from_wcs(
+                            points[0] - center
+                        ).angle_deg
+                        result.dxf.end_angle = ocs.from_wcs(
+                            points[2] - center
+                        ).angle_deg
+                else:
+                    result = getattr(decoder, name.lower())(payload)
+                if name == "CIRCLE" and (
+                    values[3] <= 0 or Vec3(values[4:7]).magnitude == 0
+                ):
+                    raise ConversionError("Proxy circle radius or normal is invalid.")
+                if name == "ELLIPTIC_ARC" and (
+                    values[6] <= 0
+                    or values[7] <= 0
+                    or values[7] > values[6]
+                    or Vec3(values[3:6]).magnitude == 0
+                ):
+                    raise ConversionError("Proxy ellipse axes or normal are invalid.")
+            if result is not None:
+                if explicit_lineweight:
+                    # ezdxf omits -3 from its generated attributes, although a
+                    # missing native DXF value means ByLayer (-1), not Default.
+                    result.dxf.lineweight = decoder.lineweight
+                if matrices:
+                    try:
+                        result.transform(matrices[-1])
+                    except Exception as exc:
+                        from ezdxf.math import NonUniformScalingError
+
+                        if isinstance(
+                            exc, NonUniformScalingError
+                        ) and result.dxftype() in {"CIRCLE", "ARC"}:
+                            from ezdxf.entities import Ellipse
+
+                            result = Ellipse.from_arc(result).transform(matrices[-1])
+                        else:
+                            raise ConversionError(
+                                f"The proxy display matrix cannot safely transform {result.dxftype()}: {type(exc).__name__}: {exc}"
+                            ) from exc
+                graphics.append(result)
+                decoder.fill = False
+        except ConversionError:
+            raise
+        except Exception as exc:
+            raise ConversionError(
+                f"Invalid proxy {name} command at byte {offset}: {type(exc).__name__}: {exc}"
+            ) from exc
+    if matrices:
+        raise ConversionError(
+            "The proxy has an unbalanced transformation matrix stack."
+        )
+    if not graphics:
+        raise ConversionError(
+            "The proxy contains no usable display geometry; export ordinary CAD entities from its originating application."
+        )
+    return graphics, [name for _, name, _ in chunks], list(dict.fromkeys(notes))
+
+
+class _TrackedOutputLayout:
+    """Record outputs before binding so a failed explosion can be discarded."""
+
+    def __init__(self, layout: Any, add_output: Callable[[Any, Any], None]) -> None:
+        self.layout = layout
+        self.add_output = add_output
+
+    def add_entity(self, entity: Any) -> None:
+        self.add_output(self.layout, entity)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.layout, name)
+
+
 class DrawingReprojector:
     """Reproject CAD geometry and explicitly account for unsupported content."""
 
@@ -1183,6 +1902,10 @@ class DrawingReprojector:
         self.result = result
         self.cancel = cancel
         self.log = log
+        self._prepared_proxy_handles: set[str] = set()
+        self._active_outputs: list[Any] = []
+        self._active_origin: tuple[str, str, str] | None = None
+        self._output_origins: dict[str, tuple[str, str, str]] = {}
         self.source_crs = CRS.from_epsg(job.source_epsg)
         self.target_crs = CRS.from_epsg(job.target_epsg)
         self.coordinate_operation = build_coordinate_operation(
@@ -1282,6 +2005,92 @@ class DrawingReprojector:
                 entity.dxf.set(name, point)
         self.result.transformed[entity_type] += 1
 
+    def _add_output(self, layout: Any, entity: Any) -> None:
+        """Track even a partially bound replacement before it reaches a layout."""
+        self._active_outputs.append(entity)
+        layout.add_entity(entity)
+        if self._active_origin is not None:
+            self._output_origins[str(entity.dxf.handle)] = self._active_origin
+
+    def _new_polyline_output(
+        self,
+        layout: Any,
+        points: Sequence[Any],
+        attributes: dict[str, Any],
+        closed: bool,
+        *,
+        lightweight: bool,
+    ) -> Any:
+        from ezdxf.entities import factory
+
+        if lightweight:
+            replacement = factory.new("LWPOLYLINE", dxfattribs=attributes)
+            replacement.set_points([(point.x, point.y) for point in points])
+        else:
+            replacement = factory.new("POLYLINE", dxfattribs={**attributes, "flags": 8})
+            replacement.append_vertices(points)
+            replacement.new_seqend()
+        replacement.close(closed)
+        self._add_output(layout, replacement)
+        return replacement
+
+    def _discard_entity(self, entity: Any) -> None:
+        """Remove a failed object and its owned vertices/attributes from the work copy."""
+        if not entity.is_alive:
+            return
+        layout = entity.get_layout()
+        if layout is not None:
+            layout.delete_entity(entity)
+        elif entity.dxf.handle in self.doc.entitydb:
+            self.doc.entitydb.delete_entity(entity)
+        else:
+            entity.destroy()
+
+    def _record_omission(
+        self, entity_type: str, handle: str, layout_name: str, reason: str
+    ) -> None:
+        source_type, source_handle, source_layout = self._active_origin or (
+            entity_type,
+            handle,
+            layout_name,
+        )
+        self.result.omitted[entity_type] += 1
+        self.result.issues.append(
+            EntityIssue(
+                severity="warning",
+                code="entity_omitted",
+                message=(
+                    f"Omitted from the converted drawing: {reason.rstrip('. ')}. "
+                    "The source drawing is unchanged. This object comes from "
+                    f"{source_type} handle {source_handle} in {source_layout}."
+                ),
+                layout=layout_name,
+                entity_type=entity_type,
+                handle=handle,
+                source_handle=source_handle,
+                source_entity_type=source_type,
+                source_layout=source_layout,
+            )
+        )
+        self.log(f"Omitted {entity_type} {handle} in {layout_name}: {reason}")
+
+    def _reject_entity(self, entity: Any, code: str, reason: str) -> None:
+        entity_type = entity.dxftype()
+        handle = str(entity.dxf.get("handle", "") or "")
+        layout_name = getattr(entity.get_layout(), "name", "<unknown>")
+        self.result.unresolved[entity_type] += 1
+        if self.job.strict_unresolved:
+            self.result.add_issue(
+                "error",
+                code,
+                f"Original object retained without reprojection. {reason}",
+                entity,
+            )
+            self.log(f"Unresolved {entity_type} {handle}: {reason}")
+        else:
+            self._discard_entity(entity)
+            self._record_omission(entity_type, handle, layout_name, reason)
+
     def _replace_by_polyline(
         self, entity: Any, vertices: Iterable[Any], closed: bool
     ) -> Any:
@@ -1289,41 +2098,401 @@ class DrawingReprojector:
         if layout is None:
             raise ConversionError("Entity is not assigned to a layout.")
         points = [self.transform_point(point) for point in vertices]
-        if len(points) < (3 if closed else 2):
-            raise ConversionError("A faceted entity produced too few vertices.")
-        if closed and points[0].isclose(points[-1]):
+        if (
+            closed
+            and len(points) > 2
+            and points[0].isclose(points[-1], rel_tol=0.0, abs_tol=1e-12)
+        ):
             points.pop()
+        if len(points) < 2:
+            raise ConversionError(
+                f"Faceting {entity.dxftype()} produced {len(points)} vertices; "
+                "at least two are required to represent this curve."
+            )
         attributes = _graphic_attributes(entity)
         same_z = (
             max(point.z for point in points) - min(point.z for point in points) <= 1e-10
         )
         if same_z and not self.target_crs.is_geocentric:
             attributes["elevation"] = float(points[0].z)
-            replacement = layout.add_lwpolyline(
-                [(point.x, point.y) for point in points],
-                close=closed,
-                dxfattribs=attributes,
-            )
-        else:
-            replacement = layout.add_polyline3d(points, dxfattribs=attributes)
-            replacement.close(closed)
+        replacement = self._new_polyline_output(
+            layout,
+            points,
+            attributes,
+            closed,
+            lightweight=same_z and not self.target_crs.is_geocentric,
+        )
         _copy_xdata(entity, replacement)
         layout.delete_entity(entity)
         return replacement
 
+    def _sample_bulge(
+        self, start: tuple[float, ...], end: tuple[float, ...]
+    ) -> Iterator[tuple[float, float, float, float, float]]:
+        """Yield segment starts in source OCS, including interpolated widths.
+
+        The following segment supplies the exact endpoint. Local chord-based
+        arithmetic avoids relative-coordinate tests and large-centre subtraction.
+        Circular sagitta controls the source-space approximation directly.
+        """
+        x, y, start_width, end_width, bulge = start
+        dx, dy = end[0] - x, end[1] - y
+        chord = math.hypot(dx, dy)
+        if bulge == 0.0 or chord == 0.0:
+            yield x, y, start_width, end_width, 0.0
+            return
+        magnitude = abs(bulge)
+        sagitta = chord * (magnitude / 2.0)
+        # An extremely shallow arc needs no intermediate point when its entire
+        # deviation from the chord is below the requested tolerance.
+        if magnitude < 1e-12 and sagitta <= self.job.curve_tolerance:
+            yield x, y, start_width, end_width, 0.0
+            return
+        radius = (chord / 4.0) * (magnitude + 1.0 / magnitude)
+        center_offset = (chord / 4.0) * (1.0 / bulge - bulge)
+        sweep = 4.0 * math.atan(bulge)
+        if not all(math.isfinite(v) for v in (radius, center_offset, sagitta)):
+            raise ConversionError("A polyline bulge defines a non-finite arc.")
+        if radius <= 0.0:
+            raise ConversionError("A polyline bulge has no representable radius.")
+        ratio = min(1.0, (self.job.curve_tolerance / radius) / 2.0)
+        step = 4.0 * math.asin(math.sqrt(ratio))
+        if step <= 0.0 or abs(sweep) > step * 1_000_000:
+            raise ConversionError(
+                "A polyline arc requires more than 1,000,000 segments at the "
+                "selected tolerance. Check the source units and curve tolerance."
+            )
+        count = max(8, math.ceil(abs(sweep) / step))
+        ux, uy = dx / chord, dy / chord
+        for index in range(count):
+            if index % 256 == 0:
+                self.cancel.check()
+            t = index / count
+            if index == 0:
+                px, py = x, y
+            else:
+                angle = sweep * t
+                half_sine_squared = math.sin(angle / 2.0) ** 2
+                along = chord * half_sine_squared + center_offset * math.sin(angle)
+                across = 2.0 * center_offset * half_sine_squared - (
+                    chord / 2.0
+                ) * math.sin(angle)
+                px = x + ux * along - uy * across
+                py = y + uy * along + ux * across
+            yield (
+                px,
+                py,
+                start_width + (end_width - start_width) * t,
+                start_width + (end_width - start_width) * ((index + 1) / count),
+                0.0,
+            )
+
+    def _polyline_2d(
+        self, entity: Any, *, source_vertices: list[Any] | None = None
+    ) -> Any:
+        """Stage all coordinates before changing a lightweight/ordinary 2D polyline."""
+        lightweight = entity.dxftype() == "LWPOLYLINE"
+        entity_type = entity.dxftype()
+        closed = bool(entity.is_closed)
+        if lightweight:
+            records = [
+                tuple(float(v) for v in row) for row in entity.get_points("xyseb")
+            ]
+            elevation = float(entity.dxf.elevation)
+            constant_width = float(entity.dxf.const_width)
+        else:
+            originals = (
+                list(entity.vertices) if source_vertices is None else source_vertices
+            )
+            records = [
+                (
+                    float(vertex.dxf.location.x),
+                    float(vertex.dxf.location.y),
+                    float(
+                        vertex.dxf.get("start_width", entity.dxf.default_start_width)
+                    ),
+                    float(vertex.dxf.get("end_width", entity.dxf.default_end_width)),
+                    float(vertex.dxf.bulge),
+                )
+                for vertex in originals
+            ]
+            fallback = originals[0].dxf.location if records else Vec3()
+            elevation = float(Vec3(entity.dxf.get("elevation", fallback)).z)
+            constant_width = 0.0
+        thickness = float(entity.dxf.thickness)
+        if not all(
+            math.isfinite(value) for value in (elevation, constant_width, thickness)
+        ) or not all(math.isfinite(value) for record in records for value in record):
+            raise ConversionError(
+                "A polyline contains non-finite coordinates or attributes."
+            )
+        if not records:
+            # ezdxf does not serialize a zero-vertex LWPOLYLINE. Remove it
+            # explicitly and report that fact before output counts are checked.
+            # There is no geometric point to move or to replace with a POINT.
+            if lightweight:
+                layout = entity.get_layout()
+                if layout is None:
+                    raise ConversionError("Empty polyline is not assigned to a layout.")
+                self.result.add_issue(
+                    "warning",
+                    "empty_polyline_omitted",
+                    "The zero-vertex LWPOLYLINE has no geometry and cannot be "
+                    "serialized by the DXF writer; it was omitted without inventing vertices.",
+                    entity,
+                )
+                layout.delete_entity(entity)
+                self.result.transformed["LWPOLYLINE_EMPTY_OMITTED"] += 1
+                return
+            self.result.transformed[f"{entity_type}_EMPTY_PRESERVED"] += 1
+            self.result.add_issue(
+                "information",
+                "empty_polyline_preserved",
+                "The empty polyline was retained; it has no vertices to reproject.",
+                entity,
+            )
+            return entity
+        sampled: list[tuple[float, float, float, float, float]] = []
+        source_offsets: list[int] = []
+        curved = False
+        zero_length_bulges = 0
+        for index, record in enumerate(records):
+            self.cancel.check()
+            source_offsets.append(len(sampled))
+            if not closed and index == len(records) - 1:
+                sampled.append(record)
+                break
+            following = records[(index + 1) % len(records)]
+            if record[4] != 0.0:
+                if record[:2] == following[:2]:
+                    zero_length_bulges += 1
+                else:
+                    curved = True
+            sampled.extend(self._sample_bulge(record, following))
+        if not all(math.isfinite(value) for record in sampled for value in record):
+            raise ConversionError(
+                "Polyline faceting produced non-finite coordinates or widths."
+            )
+        ocs = entity.ocs()
+        points = []
+        for index, record in enumerate(sampled):
+            if index % 256 == 0:
+                self.cancel.check()
+            points.append(
+                self.transform_point(ocs.to_wcs((record[0], record[1], elevation)))
+            )
+        horizontal = (
+            not self.target_crs.is_geocentric
+            and max(p.z for p in points) - min(p.z for p in points) <= 1e-10
+        )
+        has_width = constant_width != 0.0 or any(
+            r[2] != 0.0 or r[3] != 0.0 for r in sampled
+        )
+        if not horizontal and (has_width or thickness != 0.0):
+            raise ConversionError(
+                "The transformed 2D polyline is not horizontal and carries width "
+                "or thickness. A plain 3D polyline would lose that geometry."
+            )
+        output_thickness = thickness
+        if horizontal and thickness != 0.0:
+            anchor = ocs.to_wcs((sampled[0][0], sampled[0][1], elevation))
+            tip = self.transform_point(anchor + ocs.uz * thickness)
+            offset = tip - points[0]
+            if abs(offset.x) > 1e-10 or abs(offset.y) > 1e-10:
+                raise ConversionError(
+                    "The transformed polyline thickness is not perpendicular to its "
+                    "horizontal plane and cannot be preserved by a 2D polyline."
+                )
+            output_thickness = offset.z
+        output = [
+            (p.x, p.y, record[2], record[3], record[4])
+            for p, record in zip(points, sampled, strict=True)
+        ]
+        # Commit only after every sample and coordinate has passed validation.
+        if horizontal and lightweight:
+            entity.set_points(output, format="xyseb")
+            entity.dxf.elevation = points[0].z
+            entity.dxf.extrusion = Vec3(0.0, 0.0, 1.0)
+            if entity.dxf.hasattr("thickness"):
+                entity.dxf.thickness = output_thickness
+            entity.close(closed)
+        elif horizontal:
+            all_originals = list(entity.vertices)
+            original_slots = set(source_offsets)
+            if len(output) != len(originals):
+                entity.append_vertices(
+                    (row[0], row[1], 0.0)
+                    for index, row in enumerate(output)
+                    if index not in original_slots
+                )
+            extra_vertices = iter(entity.vertices[len(all_originals) :])
+            original_vertices = iter(originals)
+            entity.vertices[:] = [
+                next(original_vertices)
+                if index in original_slots
+                else next(extra_vertices)
+                for index in range(len(output))
+            ]
+            selected_ids = {id(vertex) for vertex in originals}
+            for vertex in all_originals:
+                if id(vertex) not in selected_ids:
+                    # Auxiliary fit records have already been captured by the
+                    # caller. They must not become visible connecting segments.
+                    self.doc.entitydb.delete_entity(vertex)
+            for vertex, row in zip(entity.vertices, output, strict=True):
+                vertex.dxf.location = Vec3(row[0], row[1], 0.0)
+                vertex.dxf.start_width = row[2]
+                vertex.dxf.end_width = row[3]
+                vertex.dxf.bulge = row[4]
+            entity.dxf.elevation = Vec3(0.0, 0.0, points[0].z)
+            entity.dxf.extrusion = Vec3(0.0, 0.0, 1.0)
+            if entity.dxf.hasattr("thickness"):
+                entity.dxf.thickness = output_thickness
+        else:
+            layout = entity.get_layout()
+            if layout is None:
+                raise ConversionError("Polyline is not assigned to a layout.")
+            attributes = _graphic_attributes(entity)
+            replacement = self._new_polyline_output(
+                layout,
+                points,
+                attributes,
+                closed,
+                lightweight=False,
+            )
+            _copy_xdata(entity, replacement)
+            # Record issues with the original handle before deleting the source.
+            self.result.add_issue(
+                "information",
+                "polyline_representation_changed",
+                f"The polyline was represented as {replacement.dxftype()} with its original closed flag.",
+                entity,
+            )
+            layout.delete_entity(entity)
+            entity = replacement
+        counter = self.result.approximated if curved else self.result.transformed
+        counter[entity_type] += 1
+        if zero_length_bulges:
+            self.result.add_issue(
+                "warning",
+                "zero_length_bulge_cleared",
+                f"Retained coincident vertices and cleared {zero_length_bulges} bulge(s) "
+                "on zero-length segments; those segments define no finite arc.",
+                entity,
+            )
+        if has_width or thickness != 0.0:
+            self.result.add_issue(
+                "information",
+                "polyline_width_local",
+                "Polyline widths were retained in drawing units and interpolated along "
+                "faceted arcs, without geodetic rescaling. Thickness direction and length "
+                "were mapped at the first vertex; this is a local representation.",
+                entity,
+            )
+        return entity
+
+    def _fitted_polyline(self, entity: Any) -> None:
+        """Materialize stored fitted arcs before nonlinear reprojection.
+
+        A general CRS Jacobian is not a similarity matrix, so applying it to
+        circular bulges with Polyline.transform() is not representable. Fitted
+        display vertices and spline-frame control vertices are distinct data.
+        """
+        if not entity.vertices:
+            self._polyline_2d(entity)
+            return
+        if not entity.has_arc:
+            self._local_affine(entity, "fitted_polyline_local_affine")
+            return
+
+        from ezdxf.lldxf.tagwriter import TagCollector
+
+        flags = int(entity.dxf.flags)
+        vertices = list(entity.vertices)
+        if any(int(vertex.dxf.flags) & 24 == 24 for vertex in vertices):
+            raise ConversionError(
+                "A fitted polyline vertex is marked as both a displayed spline "
+                "vertex and a spline-frame control point. Its role is ambiguous."
+            )
+        if flags & 4:
+            display = [vertex for vertex in vertices if int(vertex.dxf.flags) & 8]
+            if not display:
+                if any(int(vertex.dxf.flags) & 16 for vertex in vertices):
+                    raise ConversionError(
+                        "The spline-fitted polyline has control points but no stored "
+                        "display vertices. Its curve cannot be reconstructed safely."
+                    )
+                # Some writers retain the header fit bit on an ordinary arc
+                # chain without emitting any spline-specific vertex flags.
+                display = vertices
+        else:
+            # Curve fitting inserts extra vertices (bit 1) into the same arc
+            # chain as the original vertices; both are required for display.
+            display = [vertex for vertex in vertices if not int(vertex.dxf.flags) & 16]
+        if not display:
+            raise ConversionError("The fitted polyline has no stored display vertices.")
+        selected_ids = {id(vertex) for vertex in display}
+        archive = {
+            "source_handle": str(entity.dxf.handle),
+            "source_epsg": self.job.source_epsg,
+            "source_dxf_version": self.doc.dxfversion,
+            "source_flags": flags,
+            "source_smooth_type": int(entity.dxf.smooth_type),
+            "display_vertex_handles": [str(vertex.dxf.handle) for vertex in display],
+            "auxiliary_vertex_handles": [
+                str(vertex.dxf.handle)
+                for vertex in vertices
+                if id(vertex) not in selected_ids
+            ],
+            "source_dxf": "".join(
+                tag.dxfstr()
+                for tag in TagCollector.dxftags(entity, dxfversion=self.doc.dxfversion)
+            ),
+        }
+        target = self._polyline_2d(entity, source_vertices=display)
+        target.dxf.flags = int(target.dxf.flags) & ~6
+        target.dxf.smooth_type = 0
+        for vertex in target.vertices:
+            vertex.dxf.flags = int(vertex.dxf.flags) & ~27
+            vertex.dxf.discard("tangent")
+            vertex.dxf.bulge = 0.0
+        archive["output_handle"] = str(target.dxf.handle)
+        self.result.fitted_polyline_sources.append(archive)
+        self.result.add_issue(
+            "warning",
+            "fitted_polyline_faceted",
+            "The stored fitted display path was sampled and reprojected as an "
+            "ordinary polyline. Fit/tangent editing semantics were removed; the "
+            "original POLYLINE/VERTEX/SEQEND tags, including auxiliary control "
+            "vertices, are archived in fitted_polyline_sources in the JSON report.",
+            target,
+        )
+
     def _polyline_or_curve(self, entity: Any) -> None:
         entity_type = entity.dxftype()
+        if entity_type == "LWPOLYLINE":
+            self._polyline_2d(entity)
+            return
         if entity_type == "POLYLINE":
             mode = entity.get_mode()
             if mode in {"AcDb3dPolyline", "AcDbPolygonMesh", "AcDbPolyFaceMesh"}:
-                points = [
-                    self.transform_point(vertex.dxf.location)
+                vertices = [
+                    vertex
                     for vertex in entity.vertices
+                    if not (mode == "AcDbPolyFaceMesh" and vertex.is_face_record)
                 ]
-                for vertex, point in zip(entity.vertices, points, strict=True):
+                points = [
+                    self.transform_point(vertex.dxf.location) for vertex in vertices
+                ]
+                for vertex, point in zip(vertices, points, strict=True):
                     vertex.dxf.location = point
                 self.result.transformed[entity_type] += 1
                 return
+            if int(entity.dxf.flags) & 6:
+                self._fitted_polyline(entity)
+            else:
+                self._polyline_2d(entity)
+            return
         path = make_path(entity)
         vertices = list(path.flattening(distance=self.job.curve_tolerance, segments=8))
         is_closed = bool(getattr(path, "is_closed", False))
@@ -1414,6 +2583,110 @@ class DrawingReprojector:
             entity,
         )
 
+    def _expand_proxy(self, entity: Any) -> list[Any]:
+        """Decode a complete display snapshot before replacing a proxy object."""
+        handle = str(entity.dxf.handle)
+        if handle in self._prepared_proxy_handles:
+            return []
+        self._prepared_proxy_handles.add(handle)
+        try:
+            children, commands, notes = _decode_proxy_graphics(entity, self.cancel)
+        except CancelledError:
+            raise
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            message = (
+                f"Proxy display geometry cannot be converted: {reason.rstrip('. ')}. "
+                "To recover this object, open the source drawing in its authoring "
+                "CAD application, convert the custom "
+                "object to standard CAD entities, save a new DXF/DWG and retry."
+            )
+            self._reject_entity(entity, "proxy_unresolved", message)
+            return []
+        layout = entity.get_layout()
+        if layout is None:
+            raise ConversionError("The proxy entity has no owning layout or block.")
+        from ezdxf.lldxf.tagwriter import TagCollector
+
+        archive = {
+            "source_handle": handle,
+            "source_epsg": self.job.source_epsg,
+            "source_layout": layout.name,
+            "coordinate_frame": (
+                "block definition coordinates"
+                if layout.is_block_layout
+                else "drawing coordinates"
+            ),
+            "source_dxf_version": self.doc.dxfversion,
+            "proxy_graphics_bytes": len(entity.proxy_graphic or b""),
+            "proxy_graphics_sha256": hashlib.sha256(
+                entity.proxy_graphic or b""
+            ).hexdigest(),
+            "commands": commands,
+            "source_dxf": "".join(
+                tag.dxfstr()
+                for tag in TagCollector.dxftags(entity, dxfversion=self.doc.dxfversion)
+            ),
+        }
+        # Register children before binding so failures can remove all partial
+        # replacements, including children inserted before the failing one.
+        for child in children:
+            self.cancel.check()
+            for name in (
+                "invisible",
+                "transparency",
+                "material_handle",
+                "plotstyle_enum",
+                "plotstyle_handle",
+            ):
+                if entity.dxf.hasattr(name):
+                    child.dxf.set(name, entity.dxf.get(name))
+            self._add_output(layout, child)
+            _copy_xdata(entity, child)
+        archive["replacement_handles"] = [str(child.dxf.handle) for child in children]
+        self.result.proxy_entity_sources.append(archive)
+        self.result.add_issue(
+            "warning",
+            "proxy_graphics_materialized",
+            f"Replaced the proxy with {len(children)} native display entities. "
+            "Its proprietary editing behaviour and opaque application coordinates "
+            "were not reprojected. Original proxy tags are recorded in "
+            "proxy_entity_sources in the JSON report. " + " ".join(notes),
+            entity,
+        )
+        layout.delete_entity(entity)
+        self.result.exploded["ACAD_PROXY_ENTITY"] += 1
+        return children
+
+    def _prepare_proxies(self) -> None:
+        """Expand reachable block proxies in their source frame before INSERTs."""
+        pending = [self.doc.modelspace()]
+        if self.job.transform_paper_space:
+            pending.extend(
+                layout for layout in self.doc.layouts if layout.name != "Model"
+            )
+        visited: set[str] = set()
+        while pending:
+            self.cancel.check()
+            layout = pending.pop()
+            key = str(layout.block_record_handle)
+            if key in visited:
+                continue
+            visited.add(key)
+            for entity in list(layout):
+                self.cancel.check()
+                kind = entity.dxftype()
+                if kind == "ACAD_PROXY_ENTITY":
+                    self.transform_entity(entity)
+                elif kind == "INSERT":
+                    block = entity.block()
+                    if block is not None:
+                        pending.append(block)
+                elif kind == "DIMENSION":
+                    name = entity.dxf.get("geometry", "")
+                    if name and name in self.doc.blocks:
+                        pending.append(self.doc.blocks[name])
+
     def _composite_problem(self, entity: Any) -> str | None:
         """Inspect virtual copies before an explosion can destroy source content."""
         from ezdxf.xclip import XClip
@@ -1494,17 +2767,16 @@ class DrawingReprojector:
         entity_type = entity.dxftype()
         problem = self._composite_problem(entity)
         if problem is not None:
-            self.result.unresolved[entity_type] += 1
-            self.result.add_issue(
-                "error",
-                "composite_unresolved",
-                f"Original object retained without reprojection. {problem}",
-                entity,
-            )
+            self._reject_entity(entity, "composite_unresolved", problem)
             return []
-        # Any failure after this point may have changed the layout. The caller
-        # must abort this drawing rather than publish a partial explosion.
-        exploded = list(entity.explode())
+        layout = entity.get_layout()
+        if layout is None:
+            raise ConversionError("Composite entity is not assigned to a layout.")
+        # ezdxf can bind several children before an explosion fails. The adapter
+        # records every addition so best-effort cleanup cannot leave fragments.
+        exploded = list(
+            entity.explode(target_layout=_TrackedOutputLayout(layout, self._add_output))
+        )
         self.result.exploded[entity_type] += 1
         return exploded
 
@@ -1513,7 +2785,34 @@ class DrawingReprojector:
         entity_type = entity.dxftype()
         handle = str(entity.dxf.get("handle", "") or "")
         layout_name = getattr(entity.get_layout(), "name", "<unknown>")
+        previous_outputs = self._active_outputs
+        self._active_outputs = []
+        previous_origin = self._active_origin
+        self._active_origin = self._output_origins.get(
+            handle, (entity_type, handle, layout_name)
+        )
+        counter_names = (
+            "transformed",
+            "approximated",
+            "local_affine",
+            "exploded",
+            "unresolved",
+            "omitted",
+        )
+        list_names = ("issues", "fitted_polyline_sources", "proxy_entity_sources")
+        counters_before = (
+            {name: getattr(self.result, name).copy() for name in counter_names}
+            if not self.job.strict_unresolved
+            else {}
+        )
+        lengths_before = (
+            {name: len(getattr(self.result, name)) for name in list_names}
+            if not self.job.strict_unresolved
+            else {}
+        )
         try:
+            if entity_type == "ACAD_PROXY_ENTITY":
+                return self._expand_proxy(entity)
             if entity_type in self.COMPOSITE_TYPES:
                 return self._explode_composite(entity)
             if entity_type in self.EXACT_POINT_TYPES:
@@ -1536,21 +2835,44 @@ class DrawingReprojector:
         except (CancelledError, CoordinateTransformationError):
             raise
         except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            if not self.job.strict_unresolved:
+                try:
+                    for child in reversed(self._active_outputs):
+                        self._discard_entity(child)
+                    self._discard_entity(entity)
+                except Exception as cleanup_error:
+                    raise ConversionError(
+                        f"Could not remove failed {entity_type} (handle {handle}) "
+                        f"and its partial outputs: {cleanup_error}. "
+                        "No output was published because cleanup could not be completed."
+                    ) from cleanup_error
+                for name, counter in counters_before.items():
+                    setattr(self.result, name, counter)
+                for name, length in lengths_before.items():
+                    del getattr(self.result, name)[length:]
+                self.result.unresolved[entity_type] += 1
+                self._record_omission(entity_type, handle, layout_name, reason)
+                return []
             self.result.unresolved[entity_type] += 1
             self.result.issues.append(
                 EntityIssue(
                     severity="error",
                     code="entity_transformation_failed",
-                    message=f"Drawing publication stopped after a failed entity transformation: {exc}",
+                    message=f"Drawing publication stopped after a failed entity transformation: {reason}",
                     layout=layout_name,
                     entity_type=entity_type,
                     handle=handle,
                 )
             )
             raise ConversionError(
-                f"Could not safely transform {entity_type} (handle {handle or 'unknown'}): {exc}. "
+                f"Could not safely transform {entity_type} (handle {handle or 'unknown'}): "
+                f"{reason.rstrip('. ')}. "
                 "No output for this drawing was published because the object may have been partly changed."
             ) from exc
+        finally:
+            self._active_outputs = previous_outputs
+            self._active_origin = previous_origin
         return []
 
     def transform_layout(self, layout: Any) -> None:
@@ -1583,6 +2905,7 @@ class DrawingReprojector:
                 "currently installed non-ballpark operation will be used and recorded in the report."
             )
         self.result.input_entity_count = len(self.doc.modelspace())
+        self._prepare_proxies()
         self.transform_layout(self.doc.modelspace())
         if self.job.transform_paper_space:
             for layout in self.doc.layouts:
@@ -1679,79 +3002,97 @@ def convert_one_file(
 ) -> tuple[FileResult, dict[str, Any]]:
     target = _safe_output_path(source, job)
     result = FileResult(input_path=str(source.resolve()))
-    with prepared_dxf_input(source, job, cancel, log) as dxf_input:
-        document, audit = load_dxf(dxf_input, job.audit_and_recover, log)
-        engine = DrawingReprojector(document, job, result, cancel, log)
-        engine.run()
-        if result.unresolved and job.strict_unresolved:
-            summary = ", ".join(
-                f"{key}: {value}" for key, value in result.unresolved.items()
-            )
-            raise ConversionError(
-                "Strict mode stopped the conversion because some objects could not be "
-                f"reprojected. No output was published. Unresolved objects: {summary}"
-            )
-        with tempfile.TemporaryDirectory(prefix="cad_epsg_write_") as temp_dir:
-            intermediate = Path(temp_dir) / f"{source.stem}.dxf"
-            document.saveas(str(intermediate))
-            verification = verify_dxf(intermediate)
-            if verification["modelspace_entities"] != result.output_entity_count:
+    try:
+        with prepared_dxf_input(source, job, cancel, log) as dxf_input:
+            document, audit = load_dxf(dxf_input, job.audit_and_recover, log)
+            engine = DrawingReprojector(document, job, result, cancel, log)
+            engine.run()
+            if result.unresolved and job.strict_unresolved:
+                summary = ", ".join(
+                    f"{key}: {value}" for key, value in result.unresolved.items()
+                )
+                first_issue = next(
+                    (issue for issue in result.issues if issue.severity == "error"),
+                    None,
+                )
+                details = (
+                    f" First issue: {first_issue.entity_type} (handle {first_issue.handle}): "
+                    f"{first_issue.message}"
+                    if first_issue is not None
+                    else ""
+                )
                 raise ConversionError(
-                    "Output verification found an unexpected model-space entity count: "
-                    f"expected {result.output_entity_count}, reopened {verification['modelspace_entities']}."
+                    "Strict mode stopped the conversion because some objects could not be "
+                    f"reprojected. No output was published. Unresolved objects: {summary}."
+                    + details
                 )
-            cancel.check()
-            if target.suffix.lower() == ".dxf":
-                _atomic_copy(intermediate, target, job.overwrite)
-            else:
-                oda = detect_oda_converter(job.oda_executable)
-                if not oda:
+            with tempfile.TemporaryDirectory(prefix="cad_epsg_write_") as temp_dir:
+                intermediate = Path(temp_dir) / f"{source.stem}.dxf"
+                document.saveas(str(intermediate))
+                verification = verify_dxf(intermediate)
+                if verification["modelspace_entities"] != result.output_entity_count:
                     raise ConversionError(
-                        "DWG output requires ODA File Converter. Choose DXF output or install ODA."
+                        "Output verification found an unexpected model-space entity count: "
+                        f"expected {result.output_entity_count}, reopened {verification['modelspace_entities']}."
                     )
-                log(
-                    "Converting the reprojected temporary DXF to DWG with ODA File Converter."
-                )
-                converted = _oda_convert(
-                    intermediate, "dwg", oda, job.dwg_timeout_seconds, cancel
-                )
-                try:
-                    # A DWG is verified by an isolated ODA round trip back to DXF.
-                    checked_dxf = _oda_convert(
-                        converted, "dxf", oda, job.dwg_timeout_seconds, cancel
+                cancel.check()
+                if target.suffix.lower() == ".dxf":
+                    _atomic_copy(intermediate, target, job.overwrite)
+                else:
+                    oda = detect_oda_converter(job.oda_executable)
+                    if not oda:
+                        raise ConversionError(
+                            "DWG output requires ODA File Converter. Choose DXF output or install ODA."
+                        )
+                    log(
+                        "Converting the reprojected temporary DXF to DWG with ODA File Converter."
+                    )
+                    converted = _oda_convert(
+                        intermediate, "dwg", oda, job.dwg_timeout_seconds, cancel
                     )
                     try:
-                        verification = verify_dxf(checked_dxf)
-                        verification["method"] = "ODA DWG-to-DXF round trip"
-                        if (
-                            verification["modelspace_entities"]
-                            != result.output_entity_count
-                        ):
-                            raise ConversionError(
-                                "DWG round-trip verification found an unexpected model-space "
-                                f"entity count: expected {result.output_entity_count}, "
-                                f"found {verification['modelspace_entities']}."
-                            )
+                        # A DWG is verified by an isolated ODA round trip back to DXF.
+                        checked_dxf = _oda_convert(
+                            converted, "dxf", oda, job.dwg_timeout_seconds, cancel
+                        )
+                        try:
+                            verification = verify_dxf(checked_dxf)
+                            verification["method"] = "ODA DWG-to-DXF round trip"
+                            if (
+                                verification["modelspace_entities"]
+                                != result.output_entity_count
+                            ):
+                                raise ConversionError(
+                                    "DWG round-trip verification found an unexpected model-space "
+                                    f"entity count: expected {result.output_entity_count}, "
+                                    f"found {verification['modelspace_entities']}."
+                                )
+                        finally:
+                            shutil.rmtree(checked_dxf.parents[1], ignore_errors=True)
+                        cancel.check()
+                        _atomic_copy(converted, target, job.overwrite)
                     finally:
-                        shutil.rmtree(checked_dxf.parents[1], ignore_errors=True)
-                    cancel.check()
-                    _atomic_copy(converted, target, job.overwrite)
-                finally:
-                    shutil.rmtree(converted.parents[1], ignore_errors=True)
-    result.output_path = str(target.resolve())
-    metadata = {
-        "source_crs": engine.source_crs.to_string(),
-        "source_crs_name": engine.source_crs.name,
-        "target_crs": engine.target_crs.to_string(),
-        "target_crs_name": engine.target_crs.name,
-        "operation": engine.operation_description,
-        "accuracy_metres": engine.operation_accuracy,
-        "best_operation_available": engine.coordinate_operation.best_available,
-        "coordinate_operation": engine.coordinate_operation.report(),
-        "audit": audit,
-        "output_verification": verification,
-    }
-    return result, metadata
+                        shutil.rmtree(converted.parents[1], ignore_errors=True)
+        result.output_path = str(target.resolve())
+        metadata = {
+            "source_crs": engine.source_crs.to_string(),
+            "source_crs_name": engine.source_crs.name,
+            "target_crs": engine.target_crs.to_string(),
+            "target_crs_name": engine.target_crs.name,
+            "operation": engine.operation_description,
+            "accuracy_metres": engine.operation_accuracy,
+            "best_operation_available": engine.coordinate_operation.best_available,
+            "coordinate_operation": engine.coordinate_operation.report(),
+            "audit": audit,
+            "output_verification": verification,
+        }
+        return result, metadata
+    except ConversionError as exc:
+        exc.file_result = result.as_json()
+        raise
+    except Exception as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        raise ConversionError(reason, file_result=result.as_json()) from exc
 
 
 def _write_json_report(report: dict[str, Any], path: Path) -> None:
@@ -1792,11 +3133,13 @@ def convert_job(
         "job": asdict(job),
         "operations": [],
         "files": [],
+        "omitted_entity_count": 0,
         "notes": [
             "Curves and bulged polylines are adaptively faceted before nonlinear CRS reprojection.",
             "Block references and dimensions are exploded to transform displayed world geometry.",
             "Proprietary objects that only expose an affine transform receive a local Jacobian transform and are listed in issues.",
             "Raster images, underlays and OLE payloads are not resampled or warped by this application.",
+            "By default, unprocessable objects and partial replacements are omitted; their source handles and reasons are listed in issues. The input drawings remain unchanged.",
         ],
     }
     current_input: str | None = None
@@ -1809,10 +3152,15 @@ def convert_job(
             log(f"\n--- {source.name} ---")
             result, operation = convert_one_file(source, job, cancel, log)
             report["files"].append(result.as_json())
+            report["omitted_entity_count"] += sum(result.omitted.values())
             report["operations"].append(operation)
             current_input = None
             progress((index + 1) / total, f"Completed {source.name}")
-        report["status"] = "completed"
+        report["status"] = (
+            "completed_with_omissions"
+            if report["omitted_entity_count"]
+            else "completed"
+        )
     except (Exception, KeyboardInterrupt) as exc:
         report["status"] = (
             "cancelled"
@@ -1824,6 +3172,8 @@ def convert_job(
             "message": str(exc),
             "input_path": current_input,
         }
+        if isinstance(exc, ConversionError) and exc.file_result is not None:
+            report["failed_file"] = exc.file_result
         raise
     finally:
         report["finished_at_utc"] = _utc_now()
@@ -1832,7 +3182,7 @@ def convert_job(
             _write_json_report(report, report_path)
         except (OSError, ValueError, TypeError) as exc:
             message = f"Could not write conversion report {report_path}: {exc}"
-            if report["status"] == "completed":
+            if report["status"] in {"completed", "completed_with_omissions"}:
                 raise ConversionError(message) from exc
             # Preserve the original conversion failure if reporting also fails.
             log(message)
@@ -2454,7 +3804,7 @@ class CADConverterApp:
         self.tolerance_var = tk.StringVar(value=str(DEFAULT_CURVE_TOLERANCE))
         self.preserve_z_var = tk.BooleanVar(value=True)
         self.paper_var = tk.BooleanVar(value=False)
-        self.strict_var = tk.BooleanVar(value=True)
+        self.strict_var = tk.BooleanVar(value=False)
         self.ballpark_var = tk.BooleanVar(value=False)
         self.audit_var = tk.BooleanVar(value=True)
         self.overwrite_var = tk.BooleanVar(value=False)
@@ -3146,17 +4496,39 @@ class CADConverterApp:
                     self.status_var.set(message)
                 elif kind == "done":
                     self.progress_var.set(100)
-                    self.status_var.set("Conversion completed")
+                    omitted = payload.get("omitted_entity_count", 0)
+                    self.status_var.set(
+                        f"Completed — {omitted} object(s) omitted"
+                        if omitted
+                        else "Conversion completed"
+                    )
                     self._log("\nOutputs:")
                     for item in payload["files"]:
                         self._log(f"  {item['output_path']}")
                     self._log(f"Report: {payload['report_path']}")
+                    if omitted:
+                        self._log(
+                            f"Completed with {omitted} omitted object(s). "
+                            "See the report for source handles and reasons."
+                        )
                     self._set_busy(False)
                     self.cancel_token = None
                     if not self.closing:
-                        messagebox.showinfo(
-                            "Conversion complete",
-                            f"Converted {len(payload['files'])} drawing(s).\n\nReport:\n{payload['report_path']}",
+                        show_completion = (
+                            messagebox.showwarning if omitted else messagebox.showinfo
+                        )
+                        detail = (
+                            f"\n\n{omitted} object(s) could not be processed and were omitted. "
+                            "Their handles and reasons are listed in the report. "
+                            "Your input drawings are unchanged."
+                            if omitted
+                            else ""
+                        )
+                        show_completion(
+                            "Conversion complete with omissions"
+                            if omitted
+                            else "Conversion complete",
+                            f"Converted {len(payload['files'])} drawing(s).{detail}\n\nReport:\n{payload['report_path']}",
                             parent=self.root,
                         )
                 elif kind == "cancelled":
@@ -3228,6 +4600,15 @@ class CADConverterApp:
                 row=row, column=0, columnspan=2, sticky="w", pady=3
             )
             row += 1
+        failure_note = ttk.Label(
+            frame,
+            text="By default, unprocessable objects are omitted and listed in the report; remaining geometry is converted.",
+            wraplength=500,
+            justify="left",
+            foreground="#5E6B7A",
+        )
+        failure_note.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+        row += 1
         ttk.Separator(frame).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
         row += 1
         ttk.Label(frame, text="ODA File Converter executable").grid(
@@ -3276,7 +4657,7 @@ class CADConverterApp:
             "<Configure>",
             lambda event: [
                 label.configure(wraplength=max(220, event.width - 30))
-                for label in (oda_note, grid_note)
+                for label in (failure_note, oda_note, grid_note)
             ],
             add="+",
         )
@@ -3390,7 +4771,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--curve-tolerance", type=float, default=None)
     parser.add_argument("--transform-paper-space", action="store_true")
     parser.add_argument("--allow-ballpark", action="store_true")
-    parser.add_argument("--allow-unresolved", action="store_true")
+    failure_policy = parser.add_mutually_exclusive_group()
+    failure_policy.add_argument(
+        "--strict",
+        dest="strict_unresolved",
+        action="store_true",
+        help="stop publication if an object cannot be transformed",
+    )
+    failure_policy.add_argument(
+        "--allow-unresolved",
+        dest="strict_unresolved",
+        action="store_false",
+        help="omit unprocessable objects and continue (the default)",
+    )
+    parser.set_defaults(strict_unresolved=False)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--oda", help="ODAFileConverter executable")
     parser.add_argument(
@@ -3428,7 +4822,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else f"_EPSG{target}",
             curve_tolerance=curve_tolerance,
             transform_paper_space=arguments.transform_paper_space,
-            strict_unresolved=not arguments.allow_unresolved,
+            strict_unresolved=arguments.strict_unresolved,
             allow_ballpark=arguments.allow_ballpark,
             overwrite=arguments.overwrite,
             oda_executable=arguments.oda,
