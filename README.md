@@ -2,7 +2,11 @@
 
 ## Geodetic foundations, DGT guidance and implementation with PT-TM06/ETRS89 (EPSG:3763)
 
-Software: `CAD EPSG Converter` · Main application: `script.py` · Version: `1.0`
+The production application converts DXF/DWG drawings between 39 configured coordinate reference systems, with datum-specific GSB transformations, a live progress bar and estimated finish datetime, and a fitted CAD startup view. **Out-of-grid cleanup is enabled by default:** complete affected objects are omitted and recorded; valid objects continue through the full coordinate operation. Strict mode disables this cleanup. The input drawings are never changed.
+
+This production revision corrects saved HATCH/MPOLYGON closing-point verification for geographic outputs such as EPSG:4326, using the unchanged metre-valued publication tolerance. It retains the ellipse sampler, bounded array processing and distinction between successful optional-coordinate cleanup and unresolved geometry. The application version remains **1.0**.
+
+This release consists of `script.py` and `README.md`. Keep the existing GSB files beside the script or executable, or select their directory in Advanced settings. The application does not download grids and does not require the development test or benchmark scripts at runtime.
 
 ## Abstract
 
@@ -37,13 +41,11 @@ In geodetic terminology, a *coordinate conversion* changes representation withou
 |  | batch |
 | Incomplete objects | Omit unprocessable geometry, report it and continue |
 |  | by default; strict mode is optional |
-| Main report | `report_3763.json`, or |
-|  | `report_<target EPSG>.json` |
+| Main report | `survey_EPSG3763.json`, or |
+|  | `<first-input-stem>_EPSG<target EPSG>.json` |
 | Source identification | Declared by the user; not inferred automatically |
 | Format-only | Identical source and target EPSG codes are rejected |
 | conversion |  |
-
-Column key (left to right): Item; Application behaviour.
 
 The mathematical treatment below explains both implemented operations and relevant background methods. The application does not expose every formula discussed as an independently selectable calculator. In particular, it does not implement a dedicated DGT polynomial calculator, a geoid conversion, a survey-network adjustment or a coordinate-epoch interface.
 
@@ -88,8 +90,6 @@ The EPSG name is **ETRS89 / Portugal TM06**; **PT-TM06/ETRS89** is the familiar 
 | Application X/Y | Easting / northing | Easting / northing |
 | convention |  |  |
 
-Column key (left to right): Parameter; EPSG:3763, target; EPSG:27493, source.
-
 Negative coordinates are valid in systems with an origin inside the territory. A negative easting or northing is not evidence of a conversion failure. Conversely, plausible-looking positive values do not prove that the correct source datum has been selected.
 
 ### 2.3 Datum 73 and the historical mainland networks
@@ -100,7 +100,7 @@ The origin offsets are part of its projection definition. Subtracting `180.598 m
 
 Datum Lisboa has a different network history. DGT also describes the **Local Lisbon Triangulation**, established for 1:1,000 mapping, with a tangent-plane representation and coordinates of 12,000 m and 6,000 m assigned to Castelo de São Jorge. A drawing described only as “Lisbon coordinates” may therefore require more investigation than choosing a national EPSG code. [DGT, Datum Lisboa][dgt-lisbon]
 
-The Bessel-based historical system needs particular care. DGT notes that the historical Bessel–Bonne coordinates in use are not rigorously Bonne coordinates: they were derived by polynomial transformation from Hayford–Gauss Datum Lisboa. Its M coordinate is west-positive and P is south-positive. The application interface for EPSG:2963 is **X = P, southing; Y = M, westing**. Historical source provenance and independent control points remain essential. [DGT, Bessel Datum Lisboa][dgt-bessel]
+The Bessel-based historical system needs particular care. DGT notes that the historical Bessel–Bonne coordinates in use are not rigorously Bonne coordinates: they were derived by polynomial transformation from Hayford–Gauss Datum Lisboa. Its M coordinate is west-positive and P is south-positive. The application interface for EPSG:2963 and EPSG:5017 is **X = P, southing; Y = M, westing**. Historical source provenance and independent control points remain essential. [DGT, Bessel Datum Lisboa][dgt-bessel]
 
 ED50 is a separate datum using International 1924, with its origin associated with Potsdam. The mainland projected representation included in this application is EPSG:23029, UTM zone 29N. Its transformation requires the ED50 relationship; neither a Datum 73 grid nor a Datum Lisboa grid is interchangeable with it. [DGT, ED50][dgt-ed50]
 
@@ -116,15 +116,15 @@ DGT identifies PTRA08-UTM/ITRF93 for the autonomous regions, linked to ITRF93 th
 | Central and eastern Azores | 5015 | 26N | 27° W |
 | Madeira | 5016 | 28N | 15° W |
 
-Column key (left to right): Region; Application EPSG; UTM zone; Central meridian.
-
 These projections use GRS80, latitude of origin 0°, false easting 500,000 m, false northing 0 m and central-meridian scale factor 0.9996. The mainland default EPSG:3763 should therefore not be treated as a universal projection for every Portuguese island. The four mainland historical-datum grids distributed with this workflow are not island transformation grids.
 
 ### 2.5 Vertical references and geoid heights
 
 For a compatible geoid model, ellipsoidal height $h$, orthometric height $H$ and geoid undulation $N_g$ are related by:
 
-$$ H = h - N_g. $$
+$$
+H = h - N_g.
+$$
 
 DGT describes GeodPT08 for mainland Portugal, with 0.025° grid spacing, GRS80-referenced undulations and an estimated overall vertical accuracy of 4 cm relative to the national geodetic and levelling networks. This is a distinct dataset and operation from a horizontal NTv2 grid. [DGT, Geoid model][dgt-geoid]
 
@@ -132,84 +132,86 @@ The application does not apply the height relation above. In ordinary horizontal
 
 ## 3. EPSG systems available in the application
 
-The following tables cover all **27 identifiers** in the source and target selectors. The names are taken from the CRS definitions used by `pyproj`; some GUI descriptions are shortened. These tables describe the application's coordinate interface, which can differ from the native axis order published in an EPSG geographic CRS definition.
+Both source and target selectors contain **39 unique complete CRS identifiers**, ordered as below. The catalogue follows the requested Global/Web, Mainland Portugal, Azores and Madeira grouping. Display labels are concise; PROJ uses the complete EPSG definition, not the descriptive label or comments. Source and target defaults remain **EPSG:27493 → EPSG:3763** regardless of catalogue order.
 
-### 3.1 Mainland and European systems
+### 3.1 Global / web standards
 
-| EPSG | Reference system | Role |
+| EPSG | Selector label | Application coordinate convention |
 | --- | --- | --- |
-| **3763** | **ETRS89** **/** **Portugal** | **Projected** **metres;** **main** **target;** |
-|  | **TM06** | **X=easting,** **Y=northing** |
-| **27493** | **Datum** **73** **/** **Modified** | **Projected** **metres;** **default** **source** |
-|  | **Portuguese** **Grid** |  |
-| 4258 | ETRS89 | Geographic 2D; longitude/latitude in |
-|  |  | degrees |
-| 4937 | ETRS89 | Geographic 3D; longitude/latitude |
-|  |  | plus ellipsoidal height |
-| 4936 | ETRS89 | Geocentric XYZ in metres |
-| 4274 | Datum 73 | Geographic 2D |
-| 4207 | Lisbon | Geographic 2D, Greenwich longitude; |
-|  |  | Lisbon 1937 datum |
-| 5018 | Lisbon / Portuguese Grid | Projected metres; zero false |
-|  | New | easting/northing |
-| 20790 | Lisbon (Lisbon) / | Projected metres; Lisbon prime |
-|  | Portuguese National Grid | meridian; 200,000/300,000 m false |
-|  |  | offsets |
-| 20791 | Lisbon (Lisbon) / | Projected metres; Lisbon prime |
-|  | Portuguese Grid | meridian; zero false offsets |
-| 4666 | Lisbon 1890 | Geographic 2D; Bessel-based datum |
-| 2963 | Lisbon 1890 (Lisbon) / | Projected metres; X=southing, |
-|  | Portugal Bonne | Y=westing in this application |
-| 4230 | ED50 | Geographic 2D |
-| 23029 | ED50 / UTM zone 29N | Projected metres; historical mainland |
-|  |  | ED50 data |
-| 25829 | ETRS89 / UTM zone 29N | Projected metres; distinct from |
-|  |  | PT-TM06 |
+| 4326 | WGS 84 / Geographic 2D | X=longitude, Y=latitude, decimal degrees |
+| 3857 | WGS 84 / Pseudo-Mercator | X=easting, Y=northing, metres |
+| 32629 | WGS 84 / UTM zone 29N | X=easting, Y=northing, metres |
+| 32628 | WGS 84 / UTM zone 28N | X=easting, Y=northing, metres |
+| 32626 | WGS 84 / UTM zone 26N | X=easting, Y=northing, metres |
+| 32625 | WGS 84 / UTM zone 25N | X=easting, Y=northing, metres |
 
-Column key (left to right): EPSG; Reference system; Representation and principal role.
+The four WGS 84 UTM CRSs are separate from the corresponding ETRS89/PTRA08 projections even when they use the same UTM zone. A WGS 84 projection-to-projection conversion is not a datum change, so it does not need a mainland historical-datum GSB. A WGS 84 to historical mainland CRS still requires the correct grid stage. The realization/epoch warning includes these four WGS 84 UTM codes as well as EPSG:4326 and EPSG:3857. The projection definitions are recorded in PROJ's EPSG-derived database. [PROJ, Projected CRS definitions][proj-projected-crs]
 
-### 3.2 Autonomous regions
+EPSG:3857 is offered for interoperability. Its metre coordinate unit does not make map distances suitable substitutes for local ground survey distances. The application does not assume that generic WGS 84 and an epoch-specific regional frame are identical for high-accuracy work.
 
-| EPSG | Reference system | Role |
+### 3.2 Mainland Portugal
+
+| EPSG | Selector label | Application coordinate convention |
 | --- | --- | --- |
-| 5011 | PTRA08 | Geocentric XYZ in metres |
-| 5012 | PTRA08 | Geographic 3D |
-| 5013 | PTRA08 | Geographic 2D |
-| 5014 | PTRA08 / UTM zone 25N | Projected metres; western |
-|  |  | Azores |
-| 5015 | PTRA08 / UTM zone 26N | Projected metres; |
-|  |  | central/eastern Azores |
-| 5016 | PTRA08 / UTM zone 28N | Projected metres; Madeira |
-| 2188 | Azores Occidental 1939 / UTM | Historical western Azores |
-|  | zone 25N | datum |
-| 2189 | Azores Central 1948 / UTM | Historical central Azores datum |
-|  | zone 26N |  |
-| 2190 | Azores Oriental 1940 / UTM | Historical eastern Azores |
-|  | zone 26N | datum |
-| 2942 | Porto Santo / UTM zone 28N | Historical Porto Santo datum |
+| 4258 | ETRS89 / Geographic 2D | Longitude/latitude, degrees |
+| 4937 | ETRS89 / Geographic 3D | Longitude/latitude, degrees; ellipsoidal height, m |
+| 4936 | ETRS89 / Geocentric coordinates | Earth-centred X/Y/Z, m |
+| 3763 | ETRS89 / Portugal TM06 | Easting/northing, m; default target |
+| 25829 | ETRS89 / UTM zone 29N | Easting/northing, m |
+| 4274 | Datum 73 / Geographic 2D | Longitude/latitude, degrees |
+| 27493 | Datum 73 / Modified Portuguese Grid | Easting/northing, m; default source |
+| 4207 | Lisbon / Geographic 2D | Greenwich longitude/latitude, degrees |
+| 20790 | Lisbon / Portuguese National Grid | Easting/northing, m; Lisbon prime meridian |
+| 20791 | Lisbon / Portuguese Grid | Easting/northing, m; Lisbon prime meridian |
+| 5018 | Lisbon / Portuguese Grid New | Easting/northing, m; Greenwich prime meridian |
+| 4666 | Lisbon 1890 / Geographic 2D | Greenwich longitude/latitude, degrees |
+| 2963 | Lisbon 1890 / Portugal Bonne (X=South, Y=West) | Southing/westing, m; Lisbon prime meridian |
+| 5017 | Lisbon 1890 / Portugal Bonne New (X=South, Y=West) | Southing/westing, m; Greenwich prime meridian |
+| 4230 | ED50 / Geographic 2D | Longitude/latitude, degrees |
+| 23029 | ED50 / UTM zone 29N | Easting/northing, m |
 
-Column key (left to right): EPSG; Reference system; Representation and principal role.
+**EPSG:5017** represents Lisbon 1890 / Portugal Bonne New with Greenwich-referenced longitude and south/west projected axes. The script uses the same south/west axis handling for EPSG:2963 and EPSG:5017 and routes both to the Lisbon 1890/Bessel grid family. Historical mapping-realization qualifications in Section 2.3 still apply. [PROJ, Projected CRS definitions][proj-projected-crs]; [PROJ, Conversion definitions][proj-conversions]
 
-### 3.3 Global exchange and web display
+### 3.3 Azores and shared PTRA08 representations
 
-| EPSG | Reference system | Role |
+| EPSG | Selector label | Application coordinate convention |
 | --- | --- | --- |
-| 4326 | WGS 84 | Geographic 2D; application |
-|  |  | X=longitude, Y=latitude |
-| 3857 | WGS 84 / | Web-map projected coordinates in |
-|  | Pseudo-Mercator | metres |
+| 5013 | PTRA08 / Geographic 2D | Longitude/latitude, degrees; **Azores and Madeira** |
+| 5012 | PTRA08 / Geographic 3D | Longitude/latitude, degrees; ellipsoidal height, m; **both archipelagos** |
+| 5011 | PTRA08 / Geocentric coordinates | Earth-centred X/Y/Z, m; **both archipelagos** |
+| 5014 | PTRA08 / UTM zone 25N | Easting/northing, m; western Azores |
+| 5015 | PTRA08 / UTM zone 26N | Easting/northing, m; central/eastern Azores |
+| 4664 | Azores Oriental 1995 / Geographic 2D | Longitude/latitude, degrees |
+| 3062 | Azores Oriental 1995 / UTM zone 26N | Easting/northing, m |
+| 4665 | Azores Central 1995 / Geographic 2D | Longitude/latitude, degrees |
+| 3063 | Azores Central 1995 / UTM zone 26N | Easting/northing, m |
+| 2188 | Azores Occidental 1939 / UTM zone 25N | Easting/northing, m |
+| 2189 | Azores Central 1948 / UTM zone 26N | Easting/northing, m |
+| 2190 | Azores Oriental 1940 / UTM zone 26N | Easting/northing, m |
 
-Column key (left to right): EPSG; Reference system; Representation and principal role.
+The regional 1995 datums are distinct from PTRA08. A projection change within one 1995 datum uses its own source/target CRS definitions. A change to PTRA08 uses the available PROJ datum operation and retains its stated accuracy in the report. The mainland `pt73_e89.gsb`, `ptLX_e89.gsb`, `ptLB_e89.gsb` and `ptED_e89.gsb` files are not repurposed as island corrections. DGT identifies the same PTRA08 geographic/geocentric identifiers for **both archipelagos**, not separate Madeira-only identifiers. [DGT, National EPSG code list][dgt-epsg-codes]; [DGT, PTRA08-UTM/ITRF93][dgt-ptra08]
 
-EPSG:3857 is offered for interoperability. Its metre coordinate unit does not make its map distances suitable substitutes for local ground survey distances. ETRS89 and WGS 84 also should not be assumed identical for high-accuracy, epoch-sensitive work merely because their coordinates can appear similar at ordinary display precision.
+### 3.4 Madeira
 
-### 3.4 Axis order and prime meridians
+| EPSG | Selector label | Application coordinate convention |
+| --- | --- | --- |
+| 5016 | PTRA08 / UTM zone 28N | Easting/northing, m; Madeira region |
+| 25828 | ETRS89 / UTM zone 28N | Easting/northing, m; separate datum, check area of use |
+| 4663 | Porto Santo 1995 / Geographic 2D | Longitude/latitude, degrees |
+| 3061 | Porto Santo 1995 / UTM zone 28N | Easting/northing, m |
+| 2942 | Porto Santo / UTM zone 28N | Easting/northing, m |
 
-The application requests `always_xy=True`: geographic input is CAD X=longitude and CAD Y=latitude, in decimal degrees. A point near western mainland Portugal consequently has a negative X longitude and a positive Y latitude. Native EPSG geographic definitions commonly list latitude first, so importing a latitude/longitude table directly into CAD X/Y would reverse the coordinates. [pyproj, Transformer API][pyproj-transformer]
+For geographic or geocentric PTRA08 coordinates in Madeira, choose **5013**, **5012** or **5011**, already listed above. Repeating those same CRS definitions under another EPSG number would be incorrect. DGT identifies **5016** as the PTRA08 UTM projection for the Madeira archipelago. **25828 is available for interoperability; it is not an alias or an automatically equivalent substitute for 5016.** The installed EPSG database's area of use for 25828 does not include Madeira Island; a zone number alone is not sufficient to establish regional suitability. [DGT, National EPSG code list][dgt-epsg-codes]; [DGT, PTRA08-UTM/ITRF93][dgt-ptra08]
 
-The Lisbon-meridian definitions in EPSG:20790 and EPSG:20791 are interpreted through their CRS definitions. The geographic hub used by the local grids has Greenwich-referenced longitude. The application performs the meridian conversion; the operator must not apply an additional manual longitude offset to already projected CAD coordinates.
+### 3.5 Coordinate conventions and axis order
 
-EPSG:2963 is an explicit exception to the ordinary east/north interface. Its south/west axes remain part of the definition. The code constructs a compatible Bonne operation while retaining that axis convention and the Lisbon prime meridian. This mathematical handling does not remove the historical realisation qualification in Section 2.3.
+Both selectors contain the same 39 complete CRS definitions. Geographic and geocentric PTRA08 representations are shared by the Azores and Madeira and are listed once. The CLI and Python API use the same supported-code validation as the selectors.
+
+The application requests `always_xy=True`: geographic input is CAD X=longitude and CAD Y=latitude, in decimal degrees. Native EPSG geographic definitions commonly list latitude first; importing a latitude/longitude table directly into CAD X/Y would reverse the coordinates. [pyproj, Transformer API][pyproj-transformer]
+
+The Lisbon-meridian definitions in EPSG:20790, EPSG:20791 and EPSG:2963 are normalized through their CRS definitions before the grid is applied in Greenwich geographic coordinates. Do not add a manual longitude correction. EPSG:5017 already uses Greenwich but still has **X=southing, Y=westing**. Its unsupported PROJ method 9828 is represented by ordinary Bonne method 9827 plus the original south/west axes, as for EPSG:2963. This zero-offset mathematical equivalence is checked with a separate east/north Bonne reference. The 1995 island CRSs retain their own datum definitions and do not bypass any required-grid or missing-best-operation safeguard.
+
+A supported selector entry means the application understands that CRS's coordinate contract. It does not certify every source/target pair, every region, epoch or vertical datum. Validate the operation and its coverage; inspect the report for unavailable resources, stated transformation accuracy and any declared approximations. The conversion report records the selected CRS interfaces, coordinate-operation stages and actual grid metadata.
 
 ## 4. Mathematical foundations
 
@@ -247,7 +249,9 @@ Angles in trigonometric equations are radians unless stated otherwise. A CAD ent
 
 For a source position $\mathbf{x}_s$, the general horizontal operation can be written:
 
-$$ \mathbf{x}_t = P_t\!\left(T_{s\to t}\!\left(P_s^{-1}(\mathbf{x}_s)\right)\right). $$
+$$
+\mathbf{x}_t = P_t\!\left(T_{s\to t}\!\left(P_s^{-1}(\mathbf{x}_s)\right)\right).
+$$
 
 The inverse source projection recovers geographic coordinates on the source datum. The transformation then expresses the position in the target datum. The target projection produces the required planar coordinates. Unit conversions and prime-meridian changes are included where needed. If the datums agree, the middle operation may reduce to an identity or a representation adjustment. [IOGP, Guidance Note 7-2][iogp-gn7]
 
@@ -261,17 +265,27 @@ The intermediate geographic positions are essential to applying the grid correct
 
 The geometric relationships begin with:
 
-$$ f=(a-b)/a,\qquad e^2=2f-f^2. $$
+$$
+f=(a-b)/a,\qquad e^2=2f-f^2.
+$$
 
-$$ \nu=\frac{a}{\sqrt{1-e^2\sin^2\varphi}},\qquad \rho=\frac{a(1-e^2)}{(1-e^2\sin^2\varphi)^{3/2}}. $$
+$$
+\nu=\frac{a}{\sqrt{1-e^2\sin^2\varphi}},\qquad \rho=\frac{a(1-e^2)}{(1-e^2\sin^2\varphi)^{3/2}}.
+$$
 
 The forward geographic-to-geocentric conversion is:
 
-$$ X=(\nu+h)\cos\varphi\cos\lambda. $$
+$$
+X=(\nu+h)\cos\varphi\cos\lambda.
+$$
 
-$$ Y=(\nu+h)\cos\varphi\sin\lambda. $$
+$$
+Y=(\nu+h)\cos\varphi\sin\lambda.
+$$
 
-$$ Z=[\nu(1-e^2)+h]\sin\varphi. $$
+$$
+Z=[\nu(1-e^2)+h]\sin\varphi.
+$$
 
 The origin is at the Earth's centre; the X axis intersects the equator at Greenwich, Y intersects it at 90° E, and Z follows the north polar axis. Here $h$ is ellipsoidal height. EPSG:4936 and EPSG:5011 require genuine three-dimensional Cartesian coordinates, not a conventional plan drawing with an arbitrary Z elevation. [PROJ, Geodetic to Cartesian conversion][proj-cart]
 
@@ -283,9 +297,13 @@ Transverse Mercator is conformal: it preserves infinitesimal angles while scale 
 
 For explanatory purposes, define $A=(\lambda-\lambda_0)\cos\varphi$, $T=\tan^2\varphi$, $C=e'^2\cos^2\varphi$ and $e'^2=e^2/(1-e^2)$. The familiar leading terms illustrate the nonlinearity:
 
-$$ E \approx E_0+k_0\nu\left[A+\frac{(1-T+C)A^3}{6}\right]. $$
+$$
+E \approx E_0+k_0\nu\left[A+\frac{(1-T+C)A^3}{6}\right].
+$$
 
-$$ N \approx N_0+k_0\left[M(\varphi)-M(\varphi_0)+\nu\tan\varphi\left(\frac{A^2}{2}+\frac{(5-T+9C+4C^2)A^4}{24}\right)\right]. $$
+$$
+N \approx N_0+k_0\left[M(\varphi)-M(\varphi_0)+\nu\tan\varphi\left(\frac{A^2}{2}+\frac{(5-T+9C+4C^2)A^4}{24}\right)\right].
+$$
 
 The meridional distance is $M(\varphi)=\int_0^{\varphi}\rho(\theta)\,d\theta$. The two Transverse Mercator series above are deliberately truncated illustrations, not the numerical implementation or a substitute for a complete projection algorithm. Their powers of longitude difference explain why a drawing-wide translation cannot reproduce a general projection change. Classical cartographic development is available in Snyder's working manual. [Snyder, Map Projections][snyder]
 
@@ -295,11 +313,17 @@ For a short measured line, a local grid scale factor $k$ relates ellipsoidal and
 
 A three-parameter model accounts for a translation between geocentric origins. A seven-parameter Helmert model adds three small rotations and one scale parameter. In position-vector convention, its component form is:
 
-$$ X_t=T_X+(1+\mu)(X_s-r_ZY_s+r_YZ_s). $$
+$$
+X_t=T_X+(1+\mu)(X_s-r_ZY_s+r_YZ_s).
+$$
 
-$$ Y_t=T_Y+(1+\mu)(r_ZX_s+Y_s-r_XZ_s). $$
+$$
+Y_t=T_Y+(1+\mu)(r_ZX_s+Y_s-r_XZ_s).
+$$
 
-$$ Z_t=T_Z+(1+\mu)(-r_YX_s+r_XY_s+Z_s). $$
+$$
+Z_t=T_Z+(1+\mu)(-r_YX_s+r_XY_s+Z_s).
+$$
 
 If the published scale is $s$ parts per million, then $\mu=s\,10^{-6}$. Rotation values stated in arcseconds must be converted to radians before insertion into these equations. Coordinate-frame convention reverses the rotation signs. The convention and transformation direction therefore belong to the parameter specification. [DGT, Bursa–Wolf formula sheet][dgt-helmert-form]; [PROJ, Helmert transform][proj-helmert]
 
@@ -311,15 +335,25 @@ A time-dependent transformation can additionally use $p(t)=p(t_0)+\dot p(t-t_0)$
 
 The Molodensky formulation expresses approximate changes directly in geographic coordinates, using geocentric translations and differences between ellipsoids. With $\Delta a=a_t-a_s$ and $\Delta f=f_t-f_s$, define:
 
-$$ Q=-\Delta X\sin\varphi\cos\lambda-\Delta Y\sin\varphi\sin\lambda+\Delta Z\cos\varphi. $$
+$$
+Q=-\Delta X\sin\varphi\cos\lambda-\Delta Y\sin\varphi\sin\lambda+\Delta Z\cos\varphi.
+$$
 
-$$ B=\Delta a\frac{e^2\nu}{a}\sin\varphi\cos\varphi+\Delta f\left(\frac{a}{b}\rho+\frac{b}{a}\nu\right)\sin\varphi\cos\varphi. $$
+$$
+B=\Delta a\frac{e^2\nu}{a}\sin\varphi\cos\varphi+\Delta f\left(\frac{a}{b}\rho+\frac{b}{a}\nu\right)\sin\varphi\cos\varphi.
+$$
 
-$$ \Delta\varphi=(Q+B)/(\rho+h). $$
+$$
+\Delta\varphi=(Q+B)/(\rho+h).
+$$
 
-$$ \Delta\lambda=\frac{-\Delta X\sin\lambda+\Delta Y\cos\lambda}{(\nu+h)\cos\varphi}. $$
+$$
+\Delta\lambda=\frac{-\Delta X\sin\lambda+\Delta Y\cos\lambda}{(\nu+h)\cos\varphi}.
+$$
 
-$$ \Delta h=\Delta X\cos\varphi\cos\lambda+\Delta Y\cos\varphi\sin\lambda+\Delta Z\sin\varphi-\Delta a\frac{a}{\nu}+\Delta f\frac{b}{a}\nu\sin^2\varphi. $$
+$$
+\Delta h=\Delta X\cos\varphi\cos\lambda+\Delta Y\cos\varphi\sin\lambda+\Delta Z\sin\varphi-\Delta a\frac{a}{\nu}+\Delta f\frac{b}{a}\nu\sin^2\varphi.
+$$
 
 Target coordinates are obtained by adding these changes to the source latitude, longitude and ellipsoidal height. These equations reproduce the mathematical structure of DGT's formula sheet using the notation defined above. They require the source ellipsoid and consistent units. They are background theory here, rather than a separately exposed application mode. [DGT, Molodensky formula sheet][dgt-molodensky-form]
 
@@ -327,11 +361,17 @@ Target coordinates are obtained by adding these changes to the source latitude, 
 
 A planar polynomial can absorb smooth systematic differences through normalized source coordinates. To avoid confusing its normalization constants with ellipsoidal height or map scale, denote those constants by $L_E$ and $L_N$:
 
-$$ u=(E-E_r)/L_E,\qquad v=(N-N_r)/L_N. $$
+$$
+u=(E-E_r)/L_E,\qquad v=(N-N_r)/L_N.
+$$
 
-$$ E_t=a_0+a_1u+a_2v+a_3u^2+a_4uv+a_5v^2. $$
+$$
+E_t=a_0+a_1u+a_2v+a_3u^2+a_4uv+a_5v^2.
+$$
 
-$$ N_t=b_0+b_1u+b_2v+b_3u^2+b_4uv+b_5v^2. $$
+$$
+N_t=b_0+b_1u+b_2v+b_3u^2+b_4uv+b_5v^2.
+$$
 
 DGT publishes this form together with fitted coefficient sets. The normalizing origin and scales are indispensable: coefficients cannot be transferred to unnormalized coordinates or to a different grid origin without altering the model. A polynomial is empirical and should not be extrapolated outside its intended system and region without validation. The present application uses its configured coordinate-operation chain rather than directly evaluating DGT's published polynomial tables. [DGT, Polynomial formula sheet][dgt-polynomial-form]
 
@@ -348,8 +388,6 @@ DGT distributes NTv2 grids for Datum 73 and Datum Lisboa to ETRS89. Its descript
 | Datum 73 | 0.06 | 0.16 |
 | Datum Lisboa | 0.09 | 0.30 |
 
-Column key (left to right): Source datum; Published RMSE, m; Published maximum absolute error, m.
-
 These are dataset-validation statistics, not a guaranteed error for every input vertex. DGT also supplies polynomial, Molodensky and Bursa–Wolf alternatives; their parameters and reported residuals are available in its transformation parameter sheet. [DGT, Mainland coordinate transformations][dgt-transform]; [IGP/DGT, Transformation parameters][dgt-parameters]
 
 For reproducible mainland work, this README recommends using the DGT grids for these two datum families and recording the exact files. This is an implementation recommendation based on the official source and traceable validation; it is not a claim that DGT has certified this CAD application.
@@ -364,8 +402,6 @@ For reproducible mainland work, this README recommends using the DGT grids for t
 | Bursa–Wolf | 0.381 | 0.359 | 1.404 | 1.493 |
 | Molodensky | 0.844 | 0.563 | 1.694 | 1.600 |
 
-Column key (left to right): Method; Datum 73 E; Datum 73 N; Datum Lisboa E; Datum Lisboa N.
-
 The polynomial adjustment/check sets differ between datums; the parameter methods and NTv2 grids also have different validation datasets. Table 4 illustrates why local network deformation matters, rather than providing a universal ranking at every site. [IGP/DGT, Transformation parameters][dgt-parameters]
 
 Gonçalves' CNCG 2009 paper independently discusses the grid approach, including 0.1° spacing and an independent sample of 147 geodetic points. Its reported longitude/latitude component standard deviations were 0.052/0.047 m for Datum 73 and 0.073/0.087 m for Datum Lisboa. The accompanying FCUP resource describes both its four-datum grid collection and the DGT grids. [Gonçalves, 2009][goncalves-paper]; [Gonçalves, Coordinate transformations in Portugal][goncalves-web]
@@ -378,13 +414,17 @@ Kriging estimates a correction surface from irregularly distributed geodetic obs
 
 For a point within a cell, let $u$ and $v$ be normalized cell coordinates between zero and one. Either correction component follows the bilinear rule:
 
-$$ \delta(u,v)=(1-u)(1-v)\delta_{00}+u(1-v)\delta_{10}+(1-u)v\delta_{01}+uv\delta_{11}. $$
+$$
+\delta(u,v)=(1-u)(1-v)\delta_{00}+u(1-v)\delta_{10}+(1-u)v\delta_{01}+uv\delta_{11}.
+$$
 
 The weights sum to one. At a corner the interpolated correction equals the stored corner value. Along an edge, the equation reduces to linear interpolation between the adjoining nodes. The surface is piecewise bilinear, so denser storage samples the correction field more closely without creating new independent observations. [Gonçalves, 2009][goncalves-paper]
 
 If corrections have already been expressed in an east-positive longitude convention:
 
-$$ \lambda_t=\lambda_s+\delta\lambda(\lambda_s,\varphi_s),\qquad \varphi_t=\varphi_s+\delta\varphi(\lambda_s,\varphi_s). $$
+$$
+\lambda_t=\lambda_s+\delta\lambda(\lambda_s,\varphi_s),\qquad \varphi_t=\varphi_s+\delta\varphi(\lambda_s,\varphi_s).
+$$
 
 NTv2 longitude offsets conventionally use west-positive values. The binary-format convention and the geographic-coordinate convention must therefore be interpreted together. PROJ handles the format-specific signs; users should not negate grid contents or manually reverse longitude signs. [PROJ, Geodetic TIFF grid conventions][proj-grid-conventions]
 
@@ -392,48 +432,50 @@ NTv2 longitude offsets conventionally use west-positive values. The binary-forma
 
 For $\mathbf{q}_t=\mathbf{q}_s+\vec{\delta}(\mathbf{q}_s)$, an illustrative inverse iteration is:
 
-$$ \mathbf{q}_s^{(j+1)}=\mathbf{q}_t-\vec{\delta}(\mathbf{q}_s^{(j)}). $$
+$$
+\mathbf{q}_s^{(j+1)}=\mathbf{q}_t-\vec{\delta}(\mathbf{q}_s^{(j)}).
+$$
 
 The correction is defined as a function of source position. Subtracting one correction evaluated at the target position is generally not the rigorous inverse. The application requests PROJ's inverse grid operation when converting from ETRS89 to a historical datum. [IOGP, Guidance Note 7-2][iogp-gn7]; [PROJ, Horizontal grid shift][proj-hgrid]
 
-The application uses mandatory grid stages. Missing files, incompatible datum headers, loading failures and positions outside valid coverage stop the drawing conversion. Enabling ballpark transformations or omitting unprocessable CAD objects does not bypass a required local grid.
+The application uses mandatory grid stages. Missing files, incompatible datum headers, invalid grid payloads and loading failures stop the drawing conversion. A genuine grid-domain failure follows the selected **object-cleanup policy**: by default the complete affected object is omitted, its source handle and coordinates are recorded, and conversion continues. `--stop-outside-grid`, or strict mode, makes that domain error fatal. No out-of-grid coordinate is transformed with extrapolated shifts, clamped to the grid, left active in its source CRS or assigned an approximate fallback datum operation.
+
+Coverage is checked in the **grid's source datum**, after the inverse source projection and longitude normalization. An EPSG area-of-use rectangle, a CAD `$EXTMIN`/`$EXTMAX` header and the actual GSB node domain are different things. Coverage diagnostics identify the stage longitude/latitude, valid grid rectangles, original source WCS coordinates, entity type, handle, layer and layout. For skipped objects, `outside_grid_objects` records the owning entity and source/grid-stage coordinates; the operation record holds the grid bounds. Fatal errors also appear in the failure report and Log tab. The 1e-12-degree boundary comparison slack is numerical rounding tolerance only; it is not a licence to move drawing geometry or extrapolate the grid.
+
+At a grid edge, a valid source point may map to a target point just outside the **unshifted** source rectangle. If PROJ's inverse fails specifically because that target cannot seed an in-grid inverse evaluation, the application attempts a bounded numerical inverse of the same grid. Only trial seeds are constrained to the source rectangle; the original target is unchanged. Every forward evaluation is inside valid source coverage, and a candidate is accepted only when its forward image reproduces the target within 1e-12 degree. A target without a valid in-grid inverse source raises a grid-domain error and follows the object-cleanup policy. This is neither a lower-accuracy datum fallback nor clipping of the user's coordinates.
+
+Two non-geodetic false-failure paths receive separate handling. An ARC's mathematical circle centre can lie outside the grid while its visible short arc lies inside; the local display-scale anchor is therefore taken on the actual curve. A HATCH can also contain a stale seed point unrelated to its valid boundaries. Only a failed optional seed lying outside the source boundary envelope, or a non-finite seed, is removed after all boundary coordinates have passed. Original seed coordinates and the reason are archived under `auxiliary_coordinate_repairs`; the report records `invalid_hatch_seed_removed`. Valid seeds still use the mandatory grid. A failed seed inside the boundary envelope is not discarded individually: a typed grid-domain failure follows the complete-object policy, while other coordinate-operation failures stop conversion. HATCH boundary/fill semantics are described in the [ezdxf HATCH reference][ezdxf-hatch].
+
 
 ### 5.5 Grid filenames required by `script.py`
 
-The program discovers four specific filenames. The two DGT downloads must be supplied under the corresponding application names; their original download names are not detected automatically.
+The deployed files are **`pt73_e89.gsb`, `ptLX_e89.gsb`, `ptED_e89.gsb` and `ptLB_e89.gsb`**. The DGT downloads `D73_ETRS89_geo.gsb` and `DLX_ETRS89_geo.gsb` have been renamed to the first two names, without changing their binary contents. These four names are used in the source instructions, GUI requirements and Windows packaging command.
 
-**Table 5. Datum families, filenames and compatible DGT copies.**
+**Table 5. Datum families and deterministic filename selection.**
 
-| Datum | EPSG codes | Grid filename | DGT download |
+| Datum family | Relevant EPSG codes | First choice in a directory | Backward-compatible alternative |
 | --- | --- | --- | --- |
-| Datum 73 | 27493, 4274 | `pt73_e89.gsb` | Copy |
-|  |  |  | `D73_ETRS89_geo.gsb` |
-|  |  |  | under this name |
-| Lisbon | 4207, 5018, | `ptLX_e89.gsb` | Copy |
-| 1937 / | 20790, 20791 |  | `DLX_ETRS89_geo.gsb` |
-| Hayford |  |  | under this name |
-| Lisbon | 4666, 2963 | `ptLB_e89.gsb` | Retain the separate Bessel |
-| 1890 / |  |  | grid |
-| Bessel |  |  |  |
-| ED50 | 4230, 23029 | `ptED_e89.gsb` | Retain the separate ED50 |
-|  |  |  | grid |
+| Datum 73 | 27493, 4274 | `pt73_e89.gsb` | `D73_ETRS89_geo.gsb` |
+| Lisbon 1937 / Hayford | 4207, 5018, 20790, 20791 | `ptLX_e89.gsb` | `DLX_ETRS89_geo.gsb` |
+| Lisbon 1890 / Bessel | 4666, 2963, 5017 | `ptLB_e89.gsb` | None |
+| ED50 | 4230, 23029 | `ptED_e89.gsb` | None |
 
-Column key (left to right): Datum family; Relevant source/target EPSG codes; Filename read by application; Compatible DGT download.
+Names are matched case-insensitively. Within each resource directory, the canonical `pt*_e89.gsb` name has priority. The original DGT names remain fallback names for older installations, not additional build requirements. An explicit grid folder is exclusive. Otherwise an external directory beside the script/executable is searched before embedded resources. A selected invalid canonical file is rejected; the program does not silently try a different file to hide its failure.
 
-Renaming a copy does not change its binary grid contents. The two DGT files supplied with this project pass the script's checks because their source identifiers are `DATUM73` and `DATUMLX`, their target is `ETRS89`, and their angular unit is `SECONDS`. Keep source downloads and attribution with the project record. Replacing these external files under the expected names does not require recompiling `script.exe`.
+The complete binary structure is checked before use: overview and subgrid record lengths, source/target datums, angular units, ellipsoid axes, subgrid extents and spacing, dimensions, node counts, parent relationships, byte length and finite node values. Both byte orders are accepted. Millimetre rounding of the DGT overview's ellipsoid minor axes is allowed. A wrong-datum grid renamed to a recognised name remains invalid. Grid-edge extrapolation is disabled, with only a `1e-12` degree round-off allowance on the source footprint.
 
-**Table 6. Inspection of the supplied binary files.** These values were read from the actual attachments, rather than inferred from filename size.
+**Table 6. Binary provenance of the selected grid data.**
 
-| Grid set | Version | Spacing | Nodes/file | Bytes/file |
+| Selected data | Internal version | Spacing | Nodes | Bytes |
 | --- | --- | --- | --- | --- |
-| DGT Datum 73 and | `IGP2011` | $72^{\prime\prime}$ = | 59,010 | 944,528 |
-| Datum Lisboa files |  | 0.02° |  |  |
-| Supplied `pt73_e89.gsb` | `JAG08_01` | $360^{\prime\prime}$ | 2,501 | 40,368 |
-| and `ptLX_e89.gsb` files |  | = 0.1° |  |  |
+| DGT Datum 73, now `pt73_e89.gsb` | `IGP2011` | 72 arcseconds (0.02°) | 59,010 | 944,528 |
+| DGT Datum Lisboa, now `ptLX_e89.gsb` | `IGP2011` | 72 arcseconds (0.02°) | 59,010 | 944,528 |
+| FCUP ED50, `ptED_e89.gsb` | `JAG08_01` | 360 arcseconds (0.1°) | 2,501 | 40,368 |
+| FCUP Lisbon 1890, `ptLB_e89.gsb` | `JAG08_01` | 360 arcseconds (0.1°) | 2,501 | 40,368 |
 
-Column key (left to right): Grid set; Internal version; Angular spacing; Node count per file; Bytes per file.
+The two former FCUP Datum 73/Lisbon grids used the same alias filenames but different binary data. Therefore **a filename is not an accuracy or provenance certificate**. The actual selected paths, versions and SHA-256 values are recorded in every report. For the renamed DGT Datum 73 file, the supplied Viana do Castelo report records SHA-256 `54256060b00910d614fcf7d73c1c2514c90e6b389c750b6bfde46f7220358708`; the renamed DGT Lisbon file checked in this revision has SHA-256 `55fcfa790fa76994d937a7d90806ddd4e8994ca86cfb98651d8868b603212dbc`. No grid files are modified by this script update.
 
-The inspected DGT grids have 281 latitude rows and 210 longitude columns. Their rectangular node domain is approximately 36.7638889° to 42.3638889° N and −9.9305556° to −5.7505556° longitude. A rectangular file extent is not proof that offshore or border extrapolations have the quality of the control network.
+The inspected DGT grids have 281 latitude rows and 210 longitude columns, with a rectangular node domain of approximately 36.7638889° to 42.3638889° N and −9.9305556° to −5.7505556° longitude. A rectangular extent does not certify offshore or border accuracy. Retain the original downloads, DGT attribution and project validation records.
 
 ### 5.6 Search paths, priorities and operation selection
 
@@ -452,9 +494,9 @@ The inspected DGT grids have 281 latitude rows and 210 longitude columns. Their 
 
 An explicit grid folder replaces default search locations; missing files are not silently taken from another folder. Avoid commas, double quotation marks and line breaks in a grid directory path. Spaces are supported.
 
-For different historical datum families, the chain passes through ETRS89 and uses the appropriate forward source grid and inverse target grid. Within one historical family, only the necessary projection and meridian operations are applied. For other supported CRS combinations, `TransformerGroup` supplies available PROJ operations. The script records the selected operation and warns if a better operation is unavailable. Ballpark operations are disabled by default. [pyproj, Transformer API][pyproj-transformer]
+For different historical datum families, the chain passes through ETRS89 and uses the appropriate forward source grid and inverse target grid. Within one historical family, only the necessary projection and meridian operations are applied. For other supported CRS combinations, `TransformerGroup` supplies available PROJ operations. The script records the selected operation and blocks a lower-accuracy substitution when PROJ reports that the best known operation is unavailable. The separate **Allow lower-accuracy installed operations** / `--allow-degraded` setting is an explicit override for these non-mandatory stages. **Allow ballpark datum transformations** / `--allow-ballpark` is a separate permission. Neither permission substitutes for a missing or incompatible required mainland grid or supplies an out-of-grid datum fallback. Skipping an out-of-grid object is a separate cleanup choice. PROJ networking is explicitly disabled for deterministic local-resource operation. The drawing's estimated geographic extent is used as an area of interest for operation selection. When cleanup is enabled, an extent that cannot be interpreted because of outliers is not allowed to abort conversion before object-level checks; the normal CRS-area selection is used instead. This advisory extent is not a survey-control validation or a guarantee of accuracy across an entire rectangular extent. [pyproj, Transformer API][pyproj-transformer]
 
-The local NTv2 stage converts geographic degrees to radians, applies `hgridshift`, and converts back to degrees. The geographic hub is ETRS89, with a three-dimensional representation used when a geocentric CRS participates. These are coordinate-operation stages; they do not alter CAD layer names or determine the original survey datum.
+The local NTv2 stage converts geographic degrees to radians, applies `hgridshift`, and converts back to degrees. The horizontal grid hub is EPSG:4258, ETRS89 longitude/latitude. A same-datum projection does not receive an unnecessary grid correction. Non-grid geocentric operations explicitly promote their source/target CRS definitions to 3D. Historical-grid/geocentric combinations are rejected because no compatible height-datum model is supplied. These are coordinate-operation stages; they do not alter CAD layer names or determine the original survey datum.
 
 ## 6. Reprojection of CAD geometry
 
@@ -474,109 +516,96 @@ The implementation uses `ezdxf` entity/path facilities to obtain world geometry 
 
 For a circular arc of radius $R$ and angular interval $\Delta\theta$, the maximum separation between arc and chord is:
 
-$$ e_c=R\left[1-\cos(\Delta\theta/2)\right]. $$
+$$
+e_c=R\left[1-\cos(\Delta\theta/2)\right].
+$$
 
 A chord-error requirement $e_c\leq\varepsilon_s$ gives, for $0<\varepsilon_s<R$:
 
-$$ \Delta\theta\leq2\arccos(1-\varepsilon_s/R). $$
+$$
+\Delta\theta\leq2\arccos(1-\varepsilon_s/R).
+$$
 
-For small angular intervals, $e_c\approx R\Delta\theta^2/8$. These elementary relationships explain why tighter faceting tolerances increase the vertex count. Ordinary 2D polyline bulges are sampled directly from their signed circular sweep and radius. Other supported curve types use `ezdxf` path flattening with the same user tolerance.
+For small angular intervals, $e_c\approx R\Delta\theta^2/8$. These elementary relationships explain why tighter faceting tolerances increase the vertex count. Ordinary 2D polyline bulges are sampled directly from their signed circular sweep and radius. CIRCLE/ARC entities and circular hatch edges are evaluated from their true circular geometry rather than a cubic Bézier surrogate. ELLIPSE and SPLINE use their native construction evaluators; other supported curve types retain the documented `ezdxf` path fallback. Hatch bulges use the same signed circular sampling as ordinary polylines.
 
 A CAD bulge is the tangent of one quarter of the signed arc angle. The implementation evaluates circular samples in a local frame based on the segment chord, avoiding subtraction of a distant circle centre from large national-grid coordinates. The original segment endpoints remain explicit vertices. Small nonzero chords are not treated as coincident merely because their absolute coordinates are large. An arc requiring more than 1,000,000 facets is rejected with a diagnostic asking the user to check source units and tolerance; the requested tolerance is not silently relaxed.
 
-The default tolerance is **0.01 source drawing units** for a projected source. If those units are metres, it represents a centimetre-scale source-curve faceting criterion. The default for a geographic source is **0.000001 degrees**. A degree tolerance does not correspond to a uniform metre tolerance: its east-west distance varies with latitude.
+The default tolerance is **0.01 source drawing units** for a projected source. If those units are metres, it represents a centimetre-scale source-curve faceting criterion. The default for a geographic source is **0.00000001 degrees** (`1e-8`), applied consistently by the GUI, CLI and direct `ConversionJob` API when no tolerance is supplied. A degree tolerance does not correspond to a uniform metre tolerance: its east-west distance varies with latitude.
 
 After faceting, the vertices are transformed and connected with straight segments. A source-space tolerance is not a certified target-space error bound. In a small neighbourhood, its effect is related to the local derivative of $F$, while projection/grid curvature introduces an additional contribution. The software does not compute a global bound for that combined geometric error.
 
-Straight LINE entities and straight portions between polyline vertices are **not adaptively densified for transformation curvature**. Their transformed endpoints are connected by straight segments. For very long segments, check intermediate positions independently or prepare suitably segmented source geometry before conversion.
+Straight LINE entities and straight portions of 2D/3D polylines, leaders and hatch boundaries are additionally refined for transformation curvature. For each source segment, the algorithm transforms the quarter, half and three-quarter positions and compares them with the target-coordinate chord. It bisects a segment when the maximum sampled deviation exceeds **0.01 m** by default, or its source-space length exceeds **1,000 m**. Geographic XY deviations are converted to local metric components using the ellipsoid's separate longitude and latitude factors; Z remains metric. The same check applies to the straight chords produced by source-curve faceting.
+
+For latitude $\varphi$, with prime-vertical radius $\nu$ and meridional radius $\rho$, the local differential scales for degree-valued coordinates are:
+
+$$
+s_\lambda=\frac{\pi}{180}\nu\lvert\cos\varphi\rvert,\qquad s_\varphi=\frac{\pi}{180}\rho.
+$$
+
+This is a local metric for the *sampling criterion*, not a constant metres-to-degrees coordinate conversion. The actual coordinate mapping always uses the complete CRS/grid chain. The GUI's **Adaptive reprojection deviation (metres)** and CLI `--reprojection-tolerance-m` control this additional criterion independently of source sagitta. A long LINE becomes a polyline only when intermediate output vertices are required. Caps on recursion and vertex counts prevent unlimited allocation; cancellation is checked while sampling. An edge crossing the longitude wrap is explicitly rejected for separate handling instead of silently drawing a world-spanning chord.
+
+Quarter-point checks and the spacing cap are practical safeguards, not a proof of the continuous maximum error for every conceivable mapping. Source-curve approximation, local text/pattern mapping and the interiors of faces/meshes have separate limitations. Face and mesh vertices are transformed, but their surfaces are not adaptively retessellated. Neither tolerance should be represented as a universal final geodetic accuracy.
+
+#### Ellipse parameter intervals and source sampling
+
+An ellipse is sampled directly from its world-coordinate centre and axis vectors:
+
+$$
+\mathbf{p}(u)=\mathbf{c}+\mathbf{a}\cos u+\mathbf{b}\sin u.
+$$
+
+A full ellipse is an explicitly stored one-turn interval, even when its start parameter is not zero. A small but nonzero interval is retained as a short elliptic arc. Relative `isclose()` tests must not turn either case into an empty curve. Equal raw start/end parameters are treated as a degenerate interval and reported, not silently expanded into an invented full ellipse. Wrapped partial intervals retain their counter-clockwise direction. Hatch ellipse edges preserve an explicit 360-degree span before conversion from polar angles to ellipse parameters. [ezdxf, Ellipse][ezdxf-ellipse]
+
+With $A=[\mathbf{a}\ \mathbf{b}]$ and $r_{\max}=\sqrt{\lambda_{\max}(A^{\mathsf T}A)}$, the sampler chooses parameter steps so that $r_{\max}[1-\cos(\Delta u/2)]$ does not exceed the source chord tolerance. This follows by applying the linear map $A$ to the unit-circle chord error. It bounds the ellipse faceting error in source units; it is not a bound on datum-model uncertainty. The normal target-space adaptive checks still follow. Tilted ellipses retain their three-dimensional source geometry, and the per-object vertex limit is unchanged.
 
 ### 6.4 Local affine approximation
 
 For an anchor $\mathbf{x}_0$ and a nearby displacement $\Delta\mathbf{x}$:
 
-$$ F(\mathbf{x}_0+\Delta\mathbf{x})\approx F(\mathbf{x}_0)+J_F(\mathbf{x}_0)\Delta\mathbf{x}. $$
+$$
+F(\mathbf{x}_0+\Delta\mathbf{x})\approx F(\mathbf{x}_0)+J_F(\mathbf{x}_0)\Delta\mathbf{x}.
+$$
 
 This first-order expansion captures local translation, rotation, scale and shear. The neglected term grows with both object extent and spatial variation of the derivative. A single affine matrix therefore cannot guarantee an exact transformation of a large raster frame, text object, proprietary solid or other extended entity under a nonlinear mapping.
 
-The script estimates the Jacobian with finite differences. The derivative step is `0.00001` degrees for geographic sources and `max(0.001, curve_tolerance)` in source units otherwise. This step is a numerical derivative parameter, not a grid accuracy statement. The report lists objects that received local affine treatment.
+The script estimates the Jacobian with finite differences. Centred differences use an XY step of `0.00001` degrees for geographic sources and `0.25 m` otherwise; the Z step is separately `0.25 m` when a 3D operation is active. The derivative is no longer coupled to the user's curve tolerance. A derivative probe alone may switch to a one-sided difference at a grid boundary, and that occurrence is counted. Actual geometry points outside mandatory-grid coverage remain fatal. This step is a numerical derivative parameter, not a grid accuracy statement. The report lists objects that received local affine treatment.
 
 ### 6.5 Entity treatment
 
 **Table 7. CAD processing strategies and their consequences.**
 
-| Entity group | Processing | Interpretation |
+| Entity group | Processing | Consequence |
 | --- | --- | --- |
-| LINE, POINT, 3DFACE | Transform defining | Straight edges remain |
-|  | locations | straight between |
-|  |  | transformed vertices |
-| SOLID, TRACE | Transform | Entity representation |
-|  | world-coordinate | is normalized to the |
-|  | vertices | global extrusion |
-|  |  | direction |
-| ARC, CIRCLE, | Facet source path, | Original analytical |
-| ELLIPSE, SPLINE, | transform vertices, | curve type is replaced |
-| HELIX | create polyline |  |
-| LWPOLYLINE and | Transform vertices; | Actual closed flag |
-| ordinary 2D POLYLINE | sample circular | retained; widths use |
-|  | bulges directly | drawing units; |
-|  |  | thickness is local |
-| Fitted 2D POLYLINE | Facet stored arcs; | Source fit tags saved |
-|  | local affine mapping | in report when fitted |
-|  | when no bulges exist | arcs are materialized |
-| 3D POLYLINE, polygon | Transform stored | Existing |
-| mesh, polyface mesh | vertex locations | topology/vertex |
-|  |  | relationships are |
-|  |  | retained where |
-|  |  | supported |
-| MESH | Transform vertices | Mesh structure is |
-|  |  | retained |
-| LEADER | Transform vertices | Leader geometry |
-|  |  | moves; |
-|  |  | application-specific |
-|  |  | annotation semantics |
-|  |  | may differ |
-| HATCH, MPOLYGON | Transform faceted | Pattern definition |
-|  | boundary loops | stays local; |
-|  |  | invalid/nonplanar |
-|  |  | objects are omitted |
-|  |  | and reported |
-| INSERT | Preflight, explode, | Shared block and |
-|  | recursively transform | parametric editing |
-|  | displayed geometry | semantics are not |
-|  |  | retained for exploded |
-|  |  | references |
-| DIMENSION | Preflight rendered | Dimension text is not |
-|  | geometry, explode, | recalculated as a new |
-|  | transform | engineering |
-|  | components | measurement |
-| ACAD_PROXY_ENTITY | Decode supported | Display geometry |
-|  | saved proxy graphics | only; proprietary |
-|  | before reprojection | semantics archived |
-|  |  | as source tags |
-| TEXT, MTEXT and | Local Jacobian/affine | Local approximation |
-| other transformable | treatment | is recorded |
-| entities |  |  |
-| VIEWPORT, if | Local affine treatment | Viewport/display |
-| paper-space conversion is |  | relationships require |
-| enabled |  | inspection |
-| Raster images, underlays | Only accessible | Pixel data and |
-| and OLE content | geometry/placement | embedded payloads |
-|  | can be handled | are not warped |
-| External reference files | No independent | Referenced drawings |
-|  | recursive file | require their own |
-|  | transformation | managed conversion |
-| GEODATA/XRECORD | Retained where | Embedded |
-| and other document | supported | coordinates are not |
-| metadata |  | universally |
-|  |  | reprojected |
-
-Column key (left to right): Entity group; Processing strategy; Consequence requiring interpretation.
+| POINT | Transform location | Full selected point-coordinate operation |
+| LINE | Transform and adaptively refine source segment | Remains LINE when no intermediate vertices are needed; otherwise polyline |
+| 3DFACE, SOLID, TRACE | Transform defining WCS vertices | Raw SOLID/TRACE vertex order is preserved; extrusion thickness is local; interiors are not warped |
+| ARC, CIRCLE, ELLIPSE, SPLINE, HELIX | Sample source curve and refine target chords | Replaced by polyline; native circle/ellipse/spline evaluators avoid a cubic-circle surrogate |
+| LWPOLYLINE, ordinary 2D POLYLINE | Transform/refine vertices; map segment widths | Closed flag and original native handles retained where representable |
+| Fitted 2D POLYLINE | Materialise stored fitted arcs; local affine treatment without bulges | Original fit tags archived when arcs are materialised; fit-editing semantics are not retained |
+| 3D POLYLINE | Transform/refine segments | Explicit closure and coincident points retained; replacements can change handles when vertex counts grow |
+| MESH, polygon/polyface mesh | Transform geometric vertices | Connectivity retained; curved target surfaces are not retessellated |
+| LEADER | Transform/refine vertices; locally scale annotation sizes | Arrow size uses an entity override rather than changing the shared DIMSTYLE |
+| MULTILEADER/MLEADER | Materialise native display components before reprojection | Avoids applying an unsupported non-uniform transform directly to the composite |
+| HATCH, MPOLYGON | Sample/refine each boundary; transform seeds | Holes/path flags retained; local affine pattern mapping; non-horizontal results use explicit boundary-only fallback in best-effort mode |
+| INSERT, DIMENSION | Preflight, explode and transform displayed components | Shared-block and associative editing semantics are not retained; dimension text is not recomputed as a new measurement |
+| ACAD_PROXY_ENTITY | Decode supported saved graphics before reprojection | Native display snapshot only; original tags and unsupported appearance metadata are archived |
+| TEXT, MTEXT, other transformable entities | Local Jacobian/affine transformation | First-order approximation is reported; glyphs and custom surfaces are not globally warped |
+| VIEWPORT when paper-space conversion is selected | Local affine treatment | Layout/display relationships require inspection |
+| Raster, underlay and OLE | Accessible placement/frame geometry only | Pixels and embedded payloads are not warped |
+| External references | No independent recursive file conversion | Referenced files require separately managed conversion |
+| GEODATA, XRECORD, other metadata | Retained where supported | Opaque embedded coordinates are not universally reprojected |
 
 Constant-elevation curve replacements generally become LWPOLYLINE entities. Varying-elevation or geocentric replacements use 3D POLYLINE entities. General graphic attributes, such as layer, colour and lineweight, are copied to replacements where supported; XDATA is copied where possible and source-entity provenance is added. This is not a promise of byte-for-byte preservation of all CAD data.
 
 Ordinary lightweight and legacy 2D polylines receive dedicated handling. Their stored closed flag determines closure; no polygon vertex-count rule is applied to a CAD polyline. Single vertices, repeated vertices, short segments and two-vertex closed polylines are retained. Coordinates are first converted from the entity's object coordinate system to world coordinates, including its elevation and extrusion direction. All sampled coordinates are transformed and validated before the original geometry is changed.
 
-For a horizontal target representation, the native entity and its handle are retained. Legacy POLYLINE vertices also retain their original handles and attached data at the original vertex positions when extra arc samples are inserted. Constant and variable widths retain their values in drawing units; variable widths are interpolated by arc fraction across the new facets. Thickness is mapped locally at the first vertex, including the sign of the source extrusion. These choices preserve local styling, not an exact nonlinear transformation of the entire width or thickness envelope, and are identified in the report.
+For a horizontal target representation, the native entity and its handle are retained. Legacy POLYLINE vertices also retain their original handles and attached data at the original vertex positions when extra arc samples are inserted. Widths are not retained as unchanged metre-valued numbers in a degree-coordinate drawing, and no single area-equivalent factor is applied to every segment. Let $A$ be the local mapping from the source polyline's OCS XY plane to target XY and let $\mathbf{t}$ be the unit source tangent. The local perpendicular width scale is:
+
+$$
+s_w=\frac{\lvert\det A\rvert}{\lVert A\mathbf{t}\rVert}.
+$$
+
+This follows from area scaling divided by along-segment scaling and remains valid for a locally sheared or anisotropic mapping. It is not generally $\lVert A\mathbf{n}\rVert$ or $\sqrt{\lvert\det A\rvert}$. Factors are evaluated at both ends of each output segment. A native constant width is expanded into explicit segment start/end widths; legacy default widths are similarly made explicit. Variable widths interpolate by source arc/segment fraction before local scaling. Zero-length segments retain their coincident vertices and use a local area-equivalent scale because no tangent direction is defined. The scaling also applies between different projected CRSs, not only between metres and degrees. Thickness is mapped locally at the first vertex, including the sign of the source extrusion. These choices preserve local styling, not an exact nonlinear transformation of the entire width or thickness envelope, and are identified in the report.
 
 Fitted legacy polylines require a separate distinction. A circular bulge cannot generally survive unequal scaling in a native 2D POLYLINE, so a fitted object containing bulges is sampled before coordinate transformation. Curve-fit paths use both their original and inserted fit vertices. Where a spline-fit path has generated display vertices, only that display chain is used; its auxiliary spline-frame control points must not become visible connecting segments. The result is an ordinary polyline with the original closure and, where the target remains horizontal, its entity handle and retained display-vertex handles. Fit and tangent flags are cleared so a CAD application does not reinterpret the sampled geometry as a new fitted curve. Fitted polylines without bulges retain the reported local affine treatment. The underlying matrix restriction and vertex flags are described in the [ezdxf POLYLINE reference](https://ezdxf.readthedocs.io/en/stable/dxfentities/polyline.html).
 
@@ -584,7 +613,7 @@ When fitted arcs are materialized, the JSON report records `fitted_polyline_face
 
 A varying-elevation or geocentric result without width or thickness can be represented by a 3D POLYLINE. If width or thickness would be lost by that representation, the object is omitted and reported by default. The same policy applies to a mapped thickness direction incompatible with a horizontal 2D polyline. Strict mode instead blocks publication when such an object cannot be represented.
 
-Degenerate data receives explicit treatment. A zero-length segment retains its coincident vertices; an active nonzero bulge on that segment is cleared and reported because it defines no finite circular arc. An empty legacy POLYLINE is retained. A zero-vertex LWPOLYLINE cannot be serialized by the DXF writer and contains no geometry: it is omitted with a warning identifying its source handle, without adding fictitious vertices. Invalid object coordinates and unrepresentable arcs cause that object to be omitted and reported in the default mode. A failure of the coordinate operation, including required-grid coverage, still stops drawing publication.
+Degenerate data receives explicit treatment. A zero-length segment retains its coincident vertices; an active nonzero bulge on that segment is cleared and reported because it defines no finite circular arc. An empty legacy POLYLINE is retained. A zero-vertex LWPOLYLINE cannot be serialized by the DXF writer and contains no geometry: it is omitted with a warning identifying its source handle, without adding fictitious vertices. Malformed CAD geometry and unrepresentable arcs follow the failed-object policy. Typed grid-domain errors follow the separate out-of-grid cleanup setting. Non-finite values or invalid geographic ranges raised by the coordinate engine, missing resources and other coordinate-operation failures are not converted into grid-cleanup warnings.
 
 Proxy objects are a distinct case. An `ACAD_PROXY_ENTITY` represents a custom object whose proprietary internals cannot be transformed directly by ezdxf. Its saved proxy graphics may provide native display geometry suitable for extraction; this does not recover its original application behaviour. [ezdxf, ACADProxyEntity](https://ezdxf.readthedocs.io/en/stable/dxfentities/acad_proxy_entity.html)
 
@@ -608,7 +637,19 @@ The **Stop if a geometric object cannot be transformed** option is **off by defa
 
 Select **Stop if a geometric object cannot be transformed**, or pass `--strict` on the command line, when publication must be blocked by any identified unresolved geometric object. Strict mode still permits the documented curve faceting and local affine approximations. It is a completeness gate for identified failures, not a proof of exact geodetic or semantic preservation.
 
-Best-effort processing applies to individual CAD objects. It does not bypass invalid job settings, unavailable or incompatible datum grids, coordinate-operation failures, cancellation, drawing read/write failures or output-verification failures. Such conditions still stop publication of the affected drawing. Source drawing files are unchanged.
+Best-effort processing applies to individual CAD objects. It does not bypass invalid job settings, unavailable or incompatible datum grids, non-domain coordinate-operation failures, cancellation, drawing read/write failures or output-verification failures. Those conditions still stop publication of the affected drawing. Source drawing files are unchanged.
+
+**Out-of-grid objects and obsolete origins.** The **Skip objects outside mandatory grid coverage** option is on by default. It applies to an actual grid-domain failure, not to a hard-coded coordinate value or layer name. Consequently a standalone stale point at `(0, 0, 0)` outside the selected grid is skipped, but a legitimate projected origin inside the grid is retained. A zero in a block-local definition is not tested before the insertion transformation, and polyface face-index records are not mistaken for geometric points. The software cannot determine from coordinates alone whether an out-of-grid object is useful or obsolete; it reports the omission rather than making that semantic claim.
+
+The unit of omission is the **complete failed leaf object**. A polyline that reaches outside the domain is omitted as a whole; the program does not drop its bad vertex and connect the surrounding vertices, shorten a line, clip a boundary or move coordinates. Blocks, dimensions and multileaders are expanded into displayed components first, so a skipped child need not remove successfully converted siblings. Partial replacement entities and that object's intermediate accounting are removed before its omission is recorded. An output with no surviving finite model-space geometry is not published.
+
+| Policy | Grid-domain error | Missing/incompatible grid or another coordinate-operation failure |
+| --- | --- | --- |
+| Default cleanup | Skip complete affected object; record it; continue | Stop conversion |
+| Cleanup off / `--stop-outside-grid` | Stop conversion | Stop conversion |
+| Strict / `--strict` | Stop conversion, even when cleanup is selected | Stop conversion |
+
+`skipped_outside_grid` is a per-entity-type subset of `omitted`, not an additional omission total. Each skipped object has an `outside_grid_object_skipped` issue and a structured `outside_grid_objects` record containing handles, layer, layout and the available source/grid-stage coordinate context. The first 20 omissions are also written to the live log; subsequent objects remain individually recorded in JSON, avoiding a slow, overloaded GUI log.
 
 Paper-space geometry is excluded by default. Retained block definitions, layout objects and coordinate-bearing metadata should not be described as universally reprojected simply because the model-space geometry was processed.
 
@@ -630,11 +671,9 @@ Paper-space geometry is excluded by default. Retained block definitions, layout 
 | Geocentric source or target | Requires meaningful three-dimensional |
 |  | coordinates |
 
-Column key (left to right): Coordinate situation; Actual behaviour.
+Version 1.0 deliberately blocks direct combinations of a configured historical NTv2 datum and a geocentric target/source when the necessary ellipsoidal-height datum relationship is absent. The four horizontal grids must not be used to invent that relationship. An NTv2 horizontal grid also does not determine the change in ellipsoidal height between a historical datum and ETRS89. Passing XYZ through the coordinate chain cannot supply that missing relationship. Geocentric work requires heights consistent with the applicable ellipsoid and datum; unchanged historical ellipsoidal height is not automatically a rigorous ETRS89 height.
 
-An NTv2 horizontal grid also does not determine the change in ellipsoidal height between a historical datum and ETRS89. Passing XYZ through the coordinate chain cannot supply that missing relationship. Geocentric work requires heights consistent with the applicable ellipsoid and datum; unchanged historical ellipsoidal height is not automatically a rigorous ETRS89 height.
-
-After conversion, a projected target is marked with CAD `$INSUNITS=6`, meaning metres. Geographic and geocentric targets receive `$INSUNITS=0`, with CRS provenance in custom header variables. Geocentric XYZ values are still numerically in metres; the unitless header is an application convention rather than a change of geocentric units.
+After conversion, **projected and geocentric** targets are marked with CAD `$INSUNITS=6`, meaning metres. Geographic targets receive `$INSUNITS=0`, because a single ordinary CAD linear-unit code cannot describe degree-valued XY with metric Z. The source/target EPSG identifiers and explicit axis/unit descriptions are retained in the drawing/report. Geocentric input is converted to its geographic counterpart when estimating the operation's area of interest; Earth-centred XYZ is never mistaken for longitude/latitude.
 
 ## 7. Accuracy, uncertainty and verification
 
@@ -667,11 +706,11 @@ After conversion, a projected target is marked with CAD `$INSUNITS=6`, meaning m
 |  | forward/inverse | with surveyed control |
 |  | consistency |  |
 
-Column key (left to right): Quantity; What it describes; What it does not establish.
-
 For independent uncertainty contributions, a first-order covariance model is:
 
-$$ C_t\approx J_F C_s J_F^{T}+C_{\mathrm{op}}. $$
+$$
+C_t\approx J_F C_s J_F^{T}+C_{\mathrm{op}}.
+$$
 
 Here $C_s$ represents uncertainty of the source coordinates and $C_{\mathrm{op}}$ represents the operation model. Correlations require additional terms and cannot simply be discarded. This equation is an interpretation framework; the application does not estimate these covariance matrices. [JCGM, Guide to the Expression of Uncertainty in Measurement][jcgm]
 
@@ -683,9 +722,13 @@ Select control points with a documented source position and an independently est
 
 For point $i$, define residuals $v_{E,i}=E_{i,\mathrm{calc}}-E_{i,\mathrm{ref}}$ and $v_{N,i}=N_{i,\mathrm{calc}}-N_{i,\mathrm{ref}}$. Useful summaries include:
 
-$$ \mathrm{RMSE}_E=\sqrt{\frac{1}{n}\sum_{i=1}^{n}v_{E,i}^{2}},\qquad \mathrm{RMSE}_N=\sqrt{\frac{1}{n}\sum_{i=1}^{n}v_{N,i}^{2}}. $$
+$$
+\mathrm{RMSE}_E=\sqrt{\frac{1}{n}\sum_{i=1}^{n}v_{E,i}^{2}},\qquad \mathrm{RMSE}_N=\sqrt{\frac{1}{n}\sum_{i=1}^{n}v_{N,i}^{2}}.
+$$
 
-$$ \mathrm{RMSE}_{2D}=\sqrt{\frac{1}{n}\sum_{i=1}^{n}(v_{E,i}^{2}+v_{N,i}^{2})}. $$
+$$
+\mathrm{RMSE}_{2D}=\sqrt{\frac{1}{n}\sum_{i=1}^{n}(v_{E,i}^{2}+v_{N,i}^{2})}.
+$$
 
 Also examine mean residuals, the largest horizontal residual, the spatial pattern and any suspect control marks. A constant offset may indicate an origin issue; a rotated or position-dependent pattern can indicate axis, projection, datum or source-network problems. Residual interpretation requires the actual project context.
 
@@ -693,7 +736,7 @@ The software does not collect control-point pairs or automatically calculate the
 
 ### 7.3 Reproducible numerical example
 
-**Table 9. Illustrative coordinate calculations, EPSG:27493 to EPSG:3763.** These are synthetic test coordinates, not surveyed accuracy-control points. Values were calculated using `pyproj 3.7.2`, PROJ `9.5.1` and the supplied DGT Datum 73 file under its compatible application alias. All coordinates are metres; horizontal conversion preserves Z.
+**Table 9. Illustrative coordinate calculations, EPSG:27493 to EPSG:3763.** These are synthetic test coordinates, not surveyed accuracy-control points. Values were calculated using `pyproj 3.7.2`, PROJ `9.5.1` and the DGT Datum 73 grid now deployed as `pt73_e89.gsb`. All coordinates are metres; horizontal conversion preserves Z.
 
 | Point | Axis | Source | Target |
 | --- | --- | --- | --- |
@@ -707,21 +750,61 @@ The software does not collect control-point pairs or automatically calculate the
 | 3 | N | 100000.000000 | 99997.629952 |
 | 3 | Z | 40.000 | 40.000 |
 
-Column key: each numbered point retains its source and target E, N and Z coordinates from the same original coordinate tuple.
-
-The SHA-256 of the Datum 73 file used for this example is:
-
-```text
-54256060b00910d614fcf7d73c1c2514c90e6b389c750b6bfde46f7220358708
-```
-
 Unrounded coordinates returned to the source system with maximum component discrepancies below $2\times10^{-9}\ \mathrm{m}$ in this small calculation. This demonstrates numerical forward/inverse closure only. It is not evidence of nanometre survey accuracy, and applying the inverse to the rounded table values introduces additional rounding error.
 
 ### 7.4 File verification before publication
 
-The application writes a temporary DXF, reopens it, audits it and compares its model-space entity count with the expected result. For DWG output, ODA converts that DXF to DWG, then converts the DWG back to an isolated DXF for another audit and count comparison. Publication follows these checks.
+Before saving, the model-space startup camera is reset to a single orthographic WCS top view with an 8% fitting margin around the target XY bounds. Stale split-viewport aspect ratios and model-layout UCS references are not inherited, and regeneration is enabled. This is the stored-view equivalent of preparing Zoom Extents, rather than an automatic command executed in the user's CAD application. The receiving CAD window's aspect ratio and its treatment of saved view state remain viewer-dependent. [ezdxf, Zoom Layouts][ezdxf-zoom]
 
-The output entity count need not equal the original count: exploding blocks and replacing curves changes the entity structure. The comparison concerns the expected processed document and its saved representation. Count equality alone cannot detect every coordinate error, changed text meaning, altered hatch appearance or unsupported application payload.
+The application writes a temporary DXF, reopens it, audits it and compares the processed model-space entity count. It additionally verifies finite display geometry, visibility and the prepared WCS top-view camera. Output extents, limits and startup view are based on target XY, not stale source coordinates or a preserved metre-valued Z range. Original layer visibility is retained. An input containing geometry that leaves no surviving model-space objects is not published as a successful empty drawing.
+
+For exposed native coordinate types, verification compares **the positions that actually define the saved geometry**, rather than counting whichever optional DXF tags happen to be stored. Entity handles and types must match. Active text placement, polyline open/closed state, separate hatch boundary groups and checked mesh topology are verified. A positional difference exceeding **0.00001 m** (0.01 mm), a non-equivalent point-count change or an unmatched entity blocks publication. Geographic horizontal differences use the target ellipsoid; Z is compared in metres. This is a serialization check, not the source-curve tolerance, datum accuracy or a certification of every style, seed, opaque solid or application payload.
+
+**Large polylines.** Ordinary WCS lightweight polylines use float64 array comparisons in bounded chunks. Every positional coordinate is compared; this is not a sample or a bounding-box-only shortcut. Closed state, bulges, finite values, geographic domains and the same neutral duplicate-closure rules remain checked. Tilted object coordinate systems and other entity types retain the general verifier.
+
+**Text alignment.** A LEFT-aligned TEXT uses its insertion point; ordinary non-LEFT alignments use their alignment point. FIT and ALIGNED text use both defining endpoints. The verifier follows `get_placement()` in world coordinates for TEXT, ATTRIB and ATTDEF, and the insertion point for MTEXT. It does not call a removed or regenerated *unused* alignment tag a lost vertex. Changed active placement, alignment mode or plain text content still fails. The local affine anchor also uses the active placement, so a centred label's unused insertion field at the origin does not control its grid-domain test. [ezdxf, Text entity and placement API][ezdxf-text]
+
+**Closed hatch boundaries in degree-coordinate drawings.** HATCH and MPOLYGON boundaries are paired before their terminal vertices are interpreted. A writer can store an explicit final closing point or rely on the closed flag. When one closed, straight boundary has exactly one extra terminal vertex, the verifier measures both (a) that terminal point's distance to its own first point and (b) its distance to the other representation's first point. Both must be **at most 0.00001 m**, and all remaining coordinates must subsequently match in their original order at the same threshold. Geographic XY is converted to an ellipsoidal distance with `Geod.inv`; preserved Z contributes a metre-valued difference. There is no raw-degree or relative-coordinate tolerance. Opposite longitude-seam representations and non-identical longitudes at a pole are not treated as neutral closing vertices of a straight CAD boundary. Equal-count boundaries retain every point in the comparison. [ezdxf, HATCH boundary paths][ezdxf-hatch]; [pyproj, Geod API][pyproj-geod]
+
+This narrowly defined comparison fixes a false rejection when two closing coordinates differ only by numerical round-off and a CAD writer removes one of them. It does not remove geometry from either drawing. Open paths, curved/bulged loops, missing interior vertices, changed loop classification, changed closure/fill modes and loss of holes are not accepted by this rule. Unknown reordering or a non-equivalent representation still fails. Ordinary LWPOLYLINE/POLYLINE entities retain their existing exact-duplicate closure rule for closed, unfitted, width-free and bulge-free paths.
+
+Accepted differences are recorded in `output_verification.coordinate_comparison.serialization_normalizations`. For a hatch, `closure_checks` records the expected/reopened counts, which representation had the extra terminal point, both metre-valued distances, the terminal and counterpart coordinates, and the unchanged tolerance. The independently checked terminal-to-counterpart distance is included in the comparison's reported maximum and coordinate count; it is not hidden from the result.
+
+A genuine saved-geometry failure still prevents publication and records the object type, handle, layer, layout, processing stage and available expected/reopened coordinates in `failed_file.output_verification.failure`. Hatch failures additionally include `target_crs`, `expected_hatch` and `reopened_hatch`: path flags, closure, endpoint gaps, elevation/extrusion and indexed boundary coordinates. Up to 256 vertices per small loop are recorded in full; larger loops retain the first and last 16 indexed records, and at most 32 loops are included. Completeness flags explicitly identify truncated diagnostic snapshots. These limits apply only to the JSON evidence, **not** to geometry processing or verification.
+
+For DWG output, ODA converts the verified DXF to DWG and converts that DWG back to an isolated DXF for the same checks before publication. Neither DXF nor DWG output is accepted merely because a writer returned success. Opaque payloads and unrecognised representation changes remain outside the equivalence rules. The DWG workflow is implemented but was not executed in the Linux audit environment for this delivery.
+
+The output entity count need not equal the source count: exploding blocks and replacing curves changes structure. Verification concerns the expected processed document and its saved representation. The original source file is not overwritten.
+
+### 7.5 Executed checks and acceptance scope
+
+This saved-hatch verification revision was tested on **18 September 2026** using **Python 3.13.5 on Linux**, ezdxf 1.4.4 and pyproj 3.7.2. **166 regression tests passed without skips:** 125 retained CAD/CRS/grid/runtime cases plus 41 focused cases for metric hatch closure, preserved holes, altered vertices, topology, object-coordinate systems, Z elevations, reporting and publication. Retained fixtures explicitly select stop-on-grid-domain behaviour where that is the intended test, and reflect the existing generic CRS validation and canonical renamed-grid priority. The number is the suite executed for this revision, not a cumulative count of every previous development test file.
+
+A synthetic hatch reproduces the report's boundary counts **31/39/3 before saving and 30/38/3 after writer normalization**. Its first boundary has a terminal point differing from the first point by one floating-point step in latitude. The previous source rejects it with the same `hatch boundary 1 count changed: expected 31, reopened 30` exception. The corrected source verifies it with a maximum positional difference of approximately **1.06e-9 m**. This describes numerical round-off in a synthetic fixture, not survey accuracy or measured coordinates from the original project hatch.
+
+Tests deliberately alter real corners, interior vertices, holes, closure flags, fill modes, bulges and Z values. Those cases remain blocked. A targeted pair of publication tests substitutes a simulated format bridge for ODA: equivalent closing-point normalization completes; real geometry loss produces a structured `verify_dwg` failure report and no output. These are **mocked writer-normalization tests, not native DWG or ODA execution**. Real DXF conversion, saving, reopening and startup-view verification were also exercised through the actual renamed Datum 73 grid.
+
+The four deployed GSB files were independently checked at **4,800 positions** (1,200 each). All passed the validator's separate **0.00002 m** numerical comparison threshold; the largest independent grid discrepancy was approximately **1.01336e-5 m**. **144 analytical Mercator/geocentric control positions passed**. The saved-geometry publication threshold remains independently **0.00001 m**. The complete 1,482-pair matrix was not rerun to completion for this patch; no new all-pair result is claimed. The coordinate-operation and geometry-transformation implementations themselves are unchanged by this patch.
+
+The independent grid checker implements its own NTv2 parser/interpolator and analytical Mercator/geocentric equations; other projection calculations share PROJ. These checks do not establish equivalent survey accuracy. The Tk selectors, all 39 selection callbacks, unchanged defaults, action buttons, progress bar and finish-time display were checked under Linux/Xvfb at **1366 × 768**. Source compilation and direct-scope duplicate-definition checks also passed.
+
+**What the supplied EPSG:4326 report establishes.** `vcastelo_EPSG4326.json` records a source EPSG:27493 to target EPSG:4326 DWG job. The intermediate DXF passed verification; publication then stopped in `verify_dwg` at HATCH `B8BBC9` on `000_Boias_Navegação`, where boundary 1 changed from 31 to 30 records. Its four ELLIPSE objects were processed in this run, leaving one unresolved proxy (`BBEA7F`). The report contains the hatch counts, but not the original/reopened endpoint coordinates. It therefore does not establish whether this specific missing record is a round-off closing point or an actual geometry change. The new diagnostic snapshots resolve that evidentiary gap in any further failure.
+
+The complete original Viana do Castelo drawing, its actual hatch endpoints, a new Windows/ODA round trip and a rebuilt executable were **not** executed here. Rebuild from the corrected source, convert from the original drawing and retain the new report. A proxy with no usable display geometry remains an explicitly reported omission rather than an invented replacement.
+
+### 7.6 Performance without reduced geometric precision
+
+This patch adds a boundary-pair check only for saved HATCH/MPOLYGON verification and richer diagnostics only on failures. The existing float64 coordinate batches, exact-coordinate caches, bounded array verification, progress/ETA and fitted startup view are retained. No source-curve tolerance, target-chord criterion or publication tolerance was relaxed.
+
+A three-repeat synthetic DXF benchmark used **12,050 entities and 43,000 native positions**, EPSG:27493 → EPSG:4326, and the actual renamed DGT Datum 73 grid. Median end-to-end time was **4.025 s for the preceding source and 4.261 s for this corrected source** in this run. That small measured increase is disclosed rather than presented as a speed improvement; the workload contains no hatches, and host/timing variation limits interpretation. The purpose of this revision is to correct verification, not to claim further acceleration. Timing includes reading/auditing, coordinate processing, view setup, writing, reopened-coordinate checks and JSON reporting. Generation and cross-version comparisons are outside the timer; run order alternated.
+
+Every benchmark run retained **12,050 of 12,050 entities, with zero omissions**. All **43,000 native positions** agreed exactly between sources and after reopening, and the original file checksum was unchanged. The workload comprises 6,000 LINE objects, 6,000 POINT objects and 50 LWPOLYLINE objects with 500 vertices each. These are Linux synthetic DXF results, not predicted Windows/DWG timings.
+
+The fast conversion path handles long straight, width-free, thickness-free WCS lightweight polylines with bounded float64 arrays. It evaluates **every endpoint and every quarter/midpoint/three-quarter probe** through the complete coordinate operation. The existing 1 km source-edge criterion and conservative target-tolerance margin remain in force. An edge needing subdivision, a nonstandard plane, nonzero widths or bulges, or a 3D CRS returns to the general handler **before any object mutation**. No vertex is decimated and no tolerance is relaxed. Width-aware and fitted-curve handlers remain available.
+
+Large saved polylines are verified in bounded coordinate arrays instead of per-vertex Python object loops. Simple linear bounds use vectorized reductions; complex/width-bearing bounds retain their normal implementation. Existing exact-coordinate caches, deferred layout compaction, mandatory grid checks, failure replay and semantic verification are preserved. Native array access is isolated in one read-only adapter with an iterator fallback; updates still use the entity API. [ezdxf, Lightweight polyline][ezdxf-lwpolyline]
+
+The supplied Viana do Castelo report attributes **241.49 s** to reprojection/view preparation and **142.56 s** to its two output verification stages, out of **482.32 s** total. Those observations motivated the targeted array paths. Reading, auditing, ODA and disk costs still remain, so the benchmark percentages must not be applied mechanically to that project drawing. Per-stage `timings_seconds` remain in new reports.
 
 ## 8. Application workflow and graphical interface
 
@@ -729,7 +812,7 @@ The output entity count need not equal the original count: exploding blocks and 
 
 Identify the source EPSG code from survey records, project specifications or reliable control points. Confirm that the coordinates are in the units expected by that CRS. A CAD drawing expressed in millimetres must not be passed as metre-based national coordinates merely because its CAD unit setting can be changed. Changing `$INSUNITS` is not a rescaling operation.
 
-Place the required grid files beside the script/executable, or select a complete grid folder in Advanced settings. For the normal Datum 73 to PT-TM06 conversion, the required local grid is `pt73_e89.gsb`. Keeping all four correctly identified files available supports the other historical families without repeated folder changes.
+Place the required grid files beside the script/executable, or select a complete grid folder in Advanced settings. For the normal Datum 73 to PT-TM06 conversion, use the renamed DGT file `pt73_e89.gsb`. Keeping all four correctly identified datum families available supports the other historical systems without repeated folder changes.
 
 Install ODA File Converter when either the input or selected output is DWG. A DXF-to-DXF job does not require ODA.
 
@@ -786,16 +869,16 @@ The preview requires Pillow (`PIL`) as well as the ezdxf drawing frontend and Tk
 
 | Setting | Default | Interpretation |
 | --- | --- | --- |
-| Maximum curve | 0.01 projected source | Source-space faceting |
-| chord error | units; 0.000001° for | criterion |
-|  | the standard |  |
-|  | geographic default |  |
+| Source curve sagitta | 0.01 m / 1e-8 degree | Source-space curve sampling |
+| Target chord deviation | 0.01 m | Additional adaptive straight-segment refinement |
+| Allow lower-accuracy installed operations | Off | Explicit override when the best known non-mandatory PROJ stage is unavailable |
 | Keep Z elevations in | On | Preserve Z in ordinary 2D |
 | horizontal |  | horizontal operations |
 | conversions |  |  |
 | Transform | Off | Include layout geometry |
 | paper-space |  | only when explicitly |
 | geometry |  | intended |
+| Skip objects outside mandatory grid coverage | On | Omit the complete affected object and record its coordinates/handle; strict mode overrides |
 | Stop if a geometric | Off | Omit unprocessable objects |
 | object cannot be |  | and continue; enable to |
 | transformed |  | require strict publication |
@@ -825,10 +908,18 @@ The preview requires Pillow (`PIL`) as well as the ezdxf drawing frontend and Tk
 3. Confirm **Source EPSG:27493** and **Target EPSG:3763**, if those are the documented systems.
 4. Choose the output folder and inspect the automatically selected output format.
 5. Confirm the grid selection with **Validate transformation**.
-6. Review Advanced settings, particularly the curve tolerance and Z policy. Leave **Stop if a geometric object cannot be transformed** off to complete conversion while reporting omitted objects; enable it when every identified geometric object must pass.
+6. Review Advanced settings, including the curve tolerance, Z policy and **Skip objects outside mandatory grid coverage**. Leave cleanup on to omit out-of-grid remnants with a report. Turn it off to stop on domain errors, or enable **Stop if a geometric object cannot be transformed** to require strict completion.
 7. Select **Convert drawings** and follow the Log tab.
-8. Open the completed drawing in the intended CAD application and review `report_3763.json`, including omitted counts and the listed object handles and reasons.
+8. Open the completed drawing in the intended CAD application and review `survey_EPSG3763.json`, including omitted counts and the listed object handles and reasons.
 9. Compare relevant control points, dimensions, layers, hatches and important complex objects.
+
+### 8.7 Progress, elapsed time and estimated completion
+
+The footer shows a live progress bar, percentage, current file/phase and full **estimated finish date and time in the running computer's local time zone**, with elapsed and estimated remaining duration. The estimate initially reads “calculating from completed work” and updates after enough progress has been observed. A tilde marks an estimate, not a completion guarantee. If a long phase reports no new work for 30 seconds, the clock remains live and the estimate is revised rather than displaying an expired promise.
+
+Progress now advances **within a drawing**, including large polylines and exploded composite objects. Reading/auditing, geometry conversion, fitting the output view, writing, verification, ODA exchange and final publication occupy separate weighted phases. File sizes provide the initial weights for a multi-file batch. Composite children share their parent's remaining work budget, and displayed progress never moves backwards.
+
+This percentage measures estimated completed work, not exact elapsed-time fraction. DXF reading, some audits and ODA do not expose internal completion counts, so the bar can hold during those phases while the elapsed clock continues. ODA's internal percentage is not fabricated. **100% is emitted only after output publication and successful report writing.** Cancellation or failure preserves the last achieved progress and shows the actual stop time. The converter remains cancellable at its cooperative checkpoints.
 
 ## 9. Command-line operation
 
@@ -880,6 +971,14 @@ python script.py "survey.dxf" --output-dir "output" --strict
 
 Without `--strict`, unprocessable objects are omitted and the remaining geometry is converted. Review the report before relying on the completeness of the output.
 
+To disable grid-domain cleanup without changing the other best-effort CAD handlers:
+
+```bat
+python script.py "survey.dxf" --output-dir "output" --stop-outside-grid
+```
+
+For strict completion of all identified geometric objects, use `--strict`; it takes precedence over the cleanup setting. The normal command omits and reports out-of-grid objects. Completion with omissions returns exit code 0, so inspect the report's status and counters before treating an output as complete.
+
 ### 9.2 Complete option reference
 
 | Argument or option | Default / effect |
@@ -891,11 +990,14 @@ Without `--strict`, unprocessable objects are omitted and the remaining geometry
 | `--target-epsg` | `3763` |
 | `--format {dxf,dwg}` | First input's format if omitted |
 | `--suffix` | `_EPSG<target>` |
-| `--curve-tolerance` | `0.000001` for geographic sources; `0.01` |
+| `--curve-tolerance` | `0.00000001` for geographic sources; `0.01` |
 |  | otherwise |
+| `--reprojection-tolerance-m` | `0.01`; target-chord sampling criterion in metres |
+| `--allow-degraded` | Explicit lower-accuracy installed PROJ override; never bypass required GSB files |
 | `--transform-paper-space` | Include paper-space geometry |
 | `--allow-ballpark` | Permit available ballpark operations; does |
 |  | not bypass mandatory local grids |
+| `--stop-outside-grid` | Disable the default grid-domain object cleanup; stop on an out-of-grid object |
 | `--strict` | Block publication if geometry cannot be |
 |  | transformed; off by default |
 | `--allow-unresolved` | Compatibility alias for the default |
@@ -920,7 +1022,7 @@ Completion, including completion with reported omissions, returns exit code `0`;
 
 | Component / package | Python import | Function / scope |
 | --- | --- | --- |
-| Python 3.12, 64-bit, including | `sys`, `tkinter`, other | Source interpreter |
+| Python, 64-bit, including | `sys`, `tkinter`, other | Source interpreter |
 | Tcl/Tk | standard-library | and GUI runtime; |
 |  | modules | install on the |
 |  |  | build computer |
@@ -994,8 +1096,6 @@ Completion, including completion with reported omissions, returns exit code `0`;
 |  |  | preview; not |
 |  |  | installed by pip |
 
-Column key (left to right): Component or pip package; Python import name; Function and installation scope.
-
 Pip resolves declared dependencies automatically; the installation command nevertheless lists every runtime package above explicitly. Core ezdxf does not declare Pillow as a mandatory base dependency. Installing `ezdxf[draw]` would pull additional drawing backends, including libraries that this application's custom preview does not use. Matplotlib, PyQt, PySide and PyMuPDF are unnecessary for this implementation.
 
 Tkinter, Tcl/Tk, `venv`, `ensurepip`, `argparse`, `json`, `pathlib`, `threading`, `ctypes` and the other standard-library components are provided by the Python installation. **Do not run `pip install tkinter`, `pip install PIL` or `pip install venv`.** Select Tcl/Tk and pip when installing Python; the image package's install name is `Pillow`.
@@ -1008,7 +1108,7 @@ Place `script.py`, `README.md` and the four chosen grid files in a working folde
 
 ```bat
 cd /d "C:\DOWNLOADS\cad-epsg-conversion"
-py -3.12 -m venv .venv
+py -m venv .venv
 call .venv\Scripts\activate.bat
 python -c "import sys; assert sys.prefix != sys.base_prefix"
 python -c "import sys; print(sys.executable)"
@@ -1016,7 +1116,7 @@ python -c "import sys; print(sys.executable)"
 
 The printed path should end in the project's `.venv\Scripts\python.exe`. Python creates the virtual environment; its activation script selects that environment in the current command shell. Activation usually adds `(.venv)` to the prompt. Every subsequent `python -m pip` command then targets this environment rather than an unrelated global installation. The `call` form also works when these commands are saved in a Windows batch file.
 
-If `py -3.12` cannot select an interpreter, install 64-bit Python 3.12 with its launcher, pip and Tcl/Tk components, or use the full path to that interpreter for the environment-creation command. An existing environment can be activated without creating it again.
+The `py -m venv .venv` command uses the interpreter selected by the Windows Python launcher; it does not force a particular minor version. Confirm it with `python --version` after activation. If `py` is unavailable, install the Python launcher or call the intended Python executable by its full path. An existing environment can be activated without creating it again.
 
 ### 10.3 Bootstrap pip, upgrade installation tools and install every runtime package
 
@@ -1036,7 +1136,7 @@ python -m pip check
 
 `--upgrade` requests the newest available version allowed by each requirement. The exact ezdxf and pyproj pins retain their specified versions; the bounded supporting packages can advance within their ranges. Quotes are necessary around requirements containing `<` or `>` because Command Prompt otherwise interprets those characters as redirection. Each caret `^` must be the last character on its line, with **no trailing spaces**.
 
-The selected Python version and architecture allow the usual Windows binary wheels for these packages. If pip unexpectedly tries to compile a native package and fails, first confirm that the active interpreter is 64-bit Python 3.12 and that pip was upgraded. A compiler should not be assumed to repair a mismatched environment.
+Use a Python version and architecture for which the selected packages provide compatible Windows binary wheels. If pip unexpectedly tries to compile a native package and fails, confirm the interpreter version and 64-bit architecture, upgrade pip, and check whether compatible wheels exist for the pinned packages. A compiler should not be assumed to repair a mismatched environment.
 
 ### 10.4 Check the visualization stack and start the program
 
@@ -1091,8 +1191,6 @@ Run `deactivate` after the application or build finishes. Closing the shell also
 |  |  | command on one |
 |  |  | line |
 
-Column key (left to right): Shell; Environment activation from the project folder; Continuation syntax.
-
 The multi-line commands below are written for **Command Prompt**. Do not paste them unchanged into PowerShell. If PowerShell policy prevents activation, use Command Prompt with the documented `.bat` command. Calling an activation script from inside a Python subprocess cannot change the parent shell's environment; activation belongs in the shell before `python script.py`.
 
 ### 10.6 DWG support and ODA File Converter
@@ -1141,13 +1239,11 @@ The build below is intended to produce a **single Windows executable with all Py
 | Temporary runtime and | Created as required | Available temporary disk |
 | conversion files |  | space and permissions |
 
-Column key (left to right): Capability or resource; Included by the documented one-file build; Destination-computer requirement.
-
 One-file packaging describes delivery, not execution entirely inside the executable. PyInstaller extracts bundled resources into a temporary runtime directory and normally removes them when the application exits. This behaviour can affect startup time and the grid paths recorded in a report.
 
 ### 11.2 Syntax verification and build-tool installation
 
-Build a Windows executable **on Windows**, using the intended 64-bit Python 3.12 environment. A Linux build produces a Linux executable; PyInstaller is not a Windows cross-compiler. Start from a clean project environment containing the required packages from Section 10, then keep it activated:
+Build a Windows executable **on Windows**, using the active 64-bit Python environment with compatible package wheels. A Linux build produces a Linux executable; PyInstaller is not a Windows cross-compiler. Start from a clean project environment containing the required packages from Section 10, then keep it activated:
 
 ```bat
 python -m py_compile script.py
@@ -1168,26 +1264,20 @@ Before building, the current project folder must contain these files:
 | File | Build role |
 | --- | --- |
 | `script.py` | Main application, version 1.0 |
-| `pt73_e89.gsb` | Selected Datum 73 to ETRS89 grid |
-| `ptLX_e89.gsb` | Selected Lisbon datum to ETRS89 grid |
+| `pt73_e89.gsb` | Renamed DGT Datum 73 to ETRS89 grid |
+| `ptLX_e89.gsb` | Renamed DGT Lisbon datum to ETRS89 grid |
 | `ptED_e89.gsb` | Selected ED50 to ETRS89 grid |
 | `ptLB_e89.gsb` | Selected Lisbon 1890 to ETRS89 grid |
 
-Where the DGT files `D73_ETRS89_geo.gsb` and `DLX_ETRS89_geo.gsb` are used, apply the datum-specific local filename aliases explained in Section 5 before packaging. A filename does not change a grid's source datum, transformation direction or precision. Preserve the chosen files' provenance and checksums.
+The command below embeds the four canonical files listed above. `pt73_e89.gsb` contains the renamed `D73_ETRS89_geo.gsb` data and `ptLX_e89.gsb` contains the renamed `DLX_ETRS89_geo.gsb` data. No additional copies under the download names are required. Renaming does not modify the datum, precision or binary contents. Preserve the files' provenance and checksums.
 
 Run in the activated environment, from that folder:
 
 ```bat
-python -m PyInstaller --noconfirm --clean --onefile ^
-    --windowed --noupx ^
-    --name script --collect-all ezdxf --collect-all pyproj ^
-    --collect-all PIL --collect-all fontTools ^
-    --add-data "pt73_e89.gsb:." --add-data "ptLX_e89.gsb:." ^
-    --add-data "ptED_e89.gsb:." --add-data "ptLB_e89.gsb:." ^
-    script.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --noupx --name script --collect-all ezdxf --collect-all pyproj --collect-all PIL --collect-all fontTools --add-data "pt73_e89.gsb;." --add-data "ptLX_e89.gsb;." --add-data "ptED_e89.gsb;." --add-data "ptLB_e89.gsb;." script.py
 ```
 
-The output is **`dist\script.exe`**. Each quoted `--add-data` value uses `SOURCE:DESTINATION`; `.` places the grid at the bundled resource root. All four files must exist when building. Keep every caret at the end of its line without trailing spaces.
+The output is **`dist\script.exe`**. Each quoted `--add-data` value uses the Windows `SOURCE;DESTINATION` form; `.` places the grid at the bundled resource root. All four files must exist when building. The command is one line and can be pasted into Windows Command Prompt or PowerShell as shown.
 
 **Table 13. Build options and resource collection.**
 
@@ -1217,8 +1307,6 @@ The output is **`dist\script.exe`**. Each quoted `--add-data` value uses `SOURCE
 | `--noconfirm` | Permit replacement of the build output |
 |  | without an interactive confirmation |
 
-Column key (left to right): Option or mechanism; Purpose.
-
 Pillow's pip name is `Pillow`; its import and PyInstaller collection name is `PIL`. Similarly, pip installs `fonttools`, while collection uses `fontTools`. These names are intentional. Collection flags request the resources; the acceptance checks below establish whether a particular produced executable contains everything required on the target machine.
 
 ### 11.4 Embedded grids, overrides and deployment contents
@@ -1236,12 +1324,7 @@ Embedding the grid data has no effect on ODA discovery. Adding an arbitrary ODA 
 For an executable that displays command-line help, errors and progress, omit `--windowed` while retaining **all package collection and embedded-grid options**:
 
 ```bat
-python -m PyInstaller --noconfirm --clean --onefile --noupx ^
-    --name script --collect-all ezdxf --collect-all pyproj ^
-    --collect-all PIL --collect-all fontTools ^
-    --add-data "pt73_e89.gsb:." --add-data "ptLX_e89.gsb:." ^
-    --add-data "ptED_e89.gsb:." --add-data "ptLB_e89.gsb:." ^
-    script.py
+python -m PyInstaller --noconfirm --clean --onefile --noupx --name script --collect-all ezdxf --collect-all pyproj --collect-all PIL --collect-all fontTools --add-data "pt73_e89.gsb;." --add-data "ptLX_e89.gsb;." --add-data "ptED_e89.gsb;." --add-data "ptLB_e89.gsb;." script.py
 dist\script.exe --help
 dist\script.exe "survey.dxf" --output-dir "output" ^
     --source-epsg 27493 --target-epsg 3763 --format dxf
@@ -1250,6 +1333,15 @@ dist\script.exe "survey.dxf" --output-dir "output" ^
 Both build commands produce `dist\script.exe`; choose the intended variant before distribution because the second build replaces the first. The console variant can also launch the GUI when run without input drawings. If a windowed build fails before displaying its GUI, a console build from the same environment helps expose startup exceptions.
 
 ### 11.6 Reproducibility and clean-machine acceptance
+
+Check source syntax and the application version before packaging:
+
+```bat
+python -m py_compile script.py
+python script.py --version
+```
+
+The source-only delivery does not depend on a separate test suite or benchmark program. The executed development checks are summarized in Section 7.5. Before project deployment, convert a representative drawing with independent control points and inspect both the JSON report and the output in the intended CAD application. Test DWG input/output separately with ODA installed. Replacing the Python source or README does not update an existing `script.exe`.
 
 Capture the resolved environment after installing both runtime and build dependencies:
 
@@ -1279,7 +1371,7 @@ The script isolates the external converter's library-search environment when lau
 | files |  |
 | Open a DXF containing lines, | The black preview renders representative |
 | curves, text and hatches | content; Fit, pan and zoom work |
-| Convert known Datum 73 | Output and `report_3763.json` are |
+| Convert known Datum 73 | Output and `survey_EPSG3763.json` are |
 | control to EPSG:3763 with the | produced; report identifies the embedded |
 | grid folder blank | grid and its expected hash |
 | Check reverse and other | Selected operations resolve the intended |
@@ -1298,8 +1390,6 @@ The script isolates the external converter's library-search environment when lau
 | DWG input and output | files reopen in the intended CAD |
 | separately | software |
 
-Column key (left to right): Acceptance check on a clean Windows machine or VM; Expected evidence.
-
 These are deployment acceptance steps, not a claim that a particular Windows executable has already passed them. Source syntax, package imports and coordinate tests cannot replace execution of the frozen program on the target platform. A successful native build plus these checks is the evidence for a working standalone DXF distribution.
 
 
@@ -1312,11 +1402,13 @@ A default input `survey.dxf` produces the following file, according to the selec
 - DXF output: `survey_EPSG3763.dxf`.
 - DWG output: `survey_EPSG3763.dwg`.
 
-The report is named **`report_3763.json`**. Selecting another target changes the report name to `report_<target EPSG>.json`.
+For this input the report is **`survey_EPSG3763.json`**. In a batch, the filename uses the **first input's stem** and the target EPSG: `<first-input-stem>_EPSG<target EPSG>.json`. The report contains all completed batch files; it is not a separate JSON file for every input.
 
-A conversion that finishes after omitting unprocessable geometry is reported as **`completed_with_omissions`**. The output drawing contains the geometry that was successfully processed; it must not be interpreted as a complete reproduction of the source. The `omitted` counters and `entity_omitted` issues identify omissions by entity type, handle and reason. Keep the original drawing and the report with the converted output.
+A conversion that finishes after omitting unprocessable geometry is reported as **`completed_with_omissions`**. The output drawing contains the geometry that was successfully processed; it must not be interpreted as a complete reproduction of the source. The `omitted` counters include all omitted objects. General failures have `entity_omitted` issues; grid-domain skips have `outside_grid_object_skipped` issues, per-type `skipped_outside_grid` counters and structured `outside_grid_objects` records. These records identify source handles and coordinates without reclassifying them as successfully transformed objects. Keep the original drawing and the report with the converted output.
 
-Each run replaces the report for that target in the selected output folder, independently of the CAD overwrite setting. Archive the report elsewhere if separate run records are required. Existing CAD outputs are replaced only when overwrite is enabled. Output/input collisions and duplicate planned output names are rejected before processing.
+A completed run with a drawing-level notice or boundary-only hatch fallback is marked **`completed_with_warnings`** when there are no omissions. Generic WGS 84/epoch and explicitly degraded operation notices are visible in the report rather than hidden behind a clean success label. An ordinary **`completed`** status does not mean there were no local CAD approximations; inspect entity issues.
+
+Each run replaces the report for the same first-input stem and target in the selected output folder, independently of the CAD overwrite setting. Archive the report elsewhere if separate run records are required. Existing CAD outputs are replaced only when overwrite is enabled. Output/input collisions and duplicate planned output names are rejected before processing.
 
 If a batch stops on an error or cancellation, completed drawings remain available. The report records the batch state and completed files when processing has started. An initial validation failure can occur before report creation. The `files` list describes completed drawings. When per-file processing has started, `failed_file` records the current drawing's collected counters, issues, handles and source archives. These are partial diagnostic data, not evidence that the failed drawing was fully transformed or published. The `error` entry identifies the failure and input path.
 
@@ -1334,7 +1426,7 @@ If a batch stops on an error or cancellation, completed drawings remain availabl
 | operation | description and pipeline |
 | Grid provenance | Actual filename, resolved path, SHA-256, byte size, |
 |  | internal version, datum identifiers, direction and |
-|  | bounds |
+|  | all validated subgrid bounds, ellipsoids and node counts |
 | CAD processing | Transformed, approximated, local-affine, exploded |
 |  | unresolved and omitted counters |
 | Entity issues | Severity, issue code, message, layout, entity type and |
@@ -1346,19 +1438,25 @@ If a batch stops on an error or cancellation, completed drawings remain availabl
 | Failed drawing | Partial counters, issues, entity handles and source |
 | diagnostics | archives in `failed_file`, when available |
 
+The `environment` records Python, ezdxf, pyproj, PROJ and EPSG database versions and the disabled-network state. `coordinate_operation.stages` identifies each projection/datum stage, its pipeline, stated accuracy, grid resources and coverage. `files[].numerical_checks` gives sampled forward/inverse closure, source/target tolerance settings and the number of one-sided derivative probes. `output_verification.coordinate_comparison` records serialization discrepancies and its explicitly checked scope. Small closure is not a replacement for independently known coordinates.
+
 For a local-grid chain, `accuracy_metres` is deliberately `null`. The script does not replace it with a guaranteed centimetre value or automatically insert DGT's validation RMSE. For generic PROJ chains, reported stage accuracy information is descriptive metadata; it is not the covariance propagation described in Section 7.1.
 
-After using the DGT files under the application aliases, look for the actual internal version **`IGP2011`** and the intended file hash. The name `pt73_e89.gsb` alone does not identify which set of binary corrections was used.
+With DGT originals or compatible aliases, look for the actual internal version **`IGP2011`** and the intended file hash. The name `pt73_e89.gsb` alone does not identify which set of binary corrections was used.
 
-Polyline-specific issue codes distinguish deliberate handling from an unexplained loss: `empty_polyline_omitted` identifies a zero-vertex lightweight polyline omitted by design; `empty_polyline_preserved` identifies an empty legacy polyline; `zero_length_bulge_cleared` identifies coincident vertices with an unusable bulge; `polyline_width_local` records local width/thickness treatment; and `polyline_representation_changed` identifies conversion to a 3D representation. The transformed counter `LWPOLYLINE_EMPTY_OMITTED` counts omitted empty objects; it does not count reprojected vertices. Inspect issue handles when reconciling the source and output drawings.
+Polyline-specific issue codes distinguish deliberate handling from an unexplained loss: `empty_polyline_omitted` identifies a zero-vertex lightweight polyline omitted by design; `empty_polyline_preserved` identifies an empty legacy polyline; `zero_length_bulge_cleared` identifies coincident vertices with an unusable bulge; `polyline_width_local_rescaled` records direction-dependent local width/thickness treatment; and `polyline_representation_changed` identifies conversion to a 3D representation. The transformed counter `LWPOLYLINE_EMPTY_OMITTED` counts omitted empty objects; it does not count reprojected vertices. Inspect issue handles when reconciling the source and output drawings.
 
-For each fitted polyline materialized as an ordinary polyline, the completed file's `fitted_polyline_sources` list records its source and output handles, source EPSG, DXF version, fit flags, display/auxiliary vertex handles and original DXF tag text in `source_dxf`. The archived coordinates remain in the source CRS. Keep this report with the output drawing when the original fitting data is needed, and archive it before another run replaces `report_3763.json`. The associated issue code is `fitted_polyline_faceted`.
+For each fitted polyline materialized as an ordinary polyline, the completed file's `fitted_polyline_sources` list records its source and output handles, source EPSG, DXF version, fit flags, display/auxiliary vertex handles and original DXF tag text in `source_dxf`. The archived coordinates remain in the source CRS. Keep this report with the output drawing when the original fitting data is needed, and archive it before another run replaces `survey_EPSG3763.json`. The associated issue code is `fitted_polyline_faceted`.
 
 Proxy replacements are recorded as `proxy_graphics_materialized`, with source data in `proxy_entity_sources`. Replacement handles identify native entities created during preparation; later faceting or block explosion may replace or copy them again. In the default mode, `entity_omitted` records unsupported proxy geometry and its removal from the processed output, with its handle and recovery guidance. Under strict mode, `proxy_unresolved` identifies the problem, the error shows the first issue, and `failed_file.issues` retains all issues collected before failure. A rejected composite may cause the containing INSERT to be recorded as omitted or unresolved.
 
 For omissions, `handle` identifies the object being processed, while `source_handle`, `source_entity_type` and `source_layout` identify its originating object in the input drawing. For a generated primitive this can be its parent INSERT, DIMENSION or proxy. The batch field `omitted_entity_count` sums omitted work-copy objects across published files; it is not a count of unique original handles or visible instances. For example, an unsupported member removed from a reused block definition is counted once, even if that definition has multiple insertions.
 
 For a proxy carrying plot-style, material or mapper commands, read the appearance notes in its `proxy_graphics_materialized` warning. They identify styling retained only in the source archive. The same warning identifies a proxy lineweight replaced with ByLayer when its saved value is outside the supported range. A successful geometric conversion does not certify identical plot styles or photorealistic rendering.
+
+**Successful auxiliary cleanup.** `auxiliary_cleanup_count` counts affected objects whose invalid optional coordinates were removed after their boundary geometry passed the full operation. Original seed positions and reasons remain in `auxiliary_coordinate_repairs`, and `invalid_hatch_seed_removed` is recorded as information. The completion dialog reports these as completed cleanup, separately from drawing/display warnings and omissions. A valid-location coordinate-operation error is not downgraded to cleanup. A clean completion label still does not certify the absence of local CAD approximations.
+
+**Unresolved source evidence.** Failed ELLIPSE and ACAD_PROXY_ENTITY definitions are saved in `unresolved_entity_sources`, with handle, layer, layout, source EPSG, reason and DXF tags when obtainable. Proxies also record the stored graphics byte count and hash. Archived source coordinates are not target geometry and are not inserted into the converted drawing. A proxy without a usable display representation remains an explicitly reported omission; no rectangle, origin marker or fictitious curve is substituted. [ezdxf, Proxy entity][ezdxf-proxy]
 
 ### 12.3 Temporary files and cancellation
 
@@ -1367,6 +1465,8 @@ DWG exchange and output verification use isolated temporary directories. Complet
 Cancellation is checked between processing steps and entities. Some expensive operations must return before the next check; cancellation need not be instantaneous. When ODA is active, the application attempts to stop its process tree and clean the associated workspace. Abrupt operating-system termination is outside the normal cleanup sequence.
 
 ### 12.4 Diagnostic guide
+
+A **Saved vertex count changed** message from an earlier source is generated during output verification, not by the preview renderer. The corrected source handles the equivalent text-field and exact-closure cases in Section 7.4 without relaxing coordinate accuracy. If a saved-geometry error remains, inspect `failed_file.output_verification`: it identifies the failed entity and processing stage, with counts or positions when available. Do not change EPSG settings or relax the geometric tolerance solely to hide this error. Replace the source or rebuild the executable, then rerun from the original drawing.
 
 **Table 15. Common symptoms and checks.**
 
@@ -1388,15 +1488,12 @@ Cancellation is checked between processing steps and entities. Some expensive op
 | Executable cannot use its | Clear the explicit grid-folder setting, check |
 | embedded grid | for unintended external overrides and |
 |  | inspect the recorded grid path |
-| Required NTv2 grid is | Check the expected alias filename and the |
+| Required NTv2 grid is | Check a recognised datum-specific filename and the |
 | missing | exclusive/default search rules |
-| Original DGT downloads are | Supply compatible copies as `pt73_e89.gsb` |
-| present but not found | and `ptLX_e89.gsb` |
+| DGT files are present but not found | Check the selected grid folder. Original DGT names and legacy aliases are recognised; no renaming is required. |
 | Unexpected datum or units | A file was assigned to the wrong datum |
 | in grid header | family; check binary provenance |
-| Grid coverage error | Check the declared source CRS, |
-|  | metre/degree interpretation and actual |
-|  | geographic extent |
+| Grid coverage error | Check the source CRS, units and failing-object coordinates in the report. Cleanup is on by default; strict mode or `--stop-outside-grid` turns a domain error into a stop. |
 | Very large or implausible | Check source datum, false origin, axis order |
 | displacement | and source drawing units |
 | EPSG:2963 result is | Check X=southing/Y=westing and the |
@@ -1431,8 +1528,6 @@ Cancellation is checked between processing steps and entities. Some expensive op
 |  | Keep Z enabled; no geoid correction is |
 |  | applied |
 
-Column key (left to right): Symptom; Likely issue or next check.
-
 ## 13. Discussion and conclusions
 
 The principal geodetic decision is the correct identification of the source system. A precise numerical engine applied to the wrong datum, projection, units or axes can produce a consistent but incorrect drawing. For mainland work requiring the national target system, the documented workflow centres on EPSG:3763 and uses the corresponding historical-datum grid when necessary.
@@ -1445,7 +1540,7 @@ A defensible project deliverable combines three forms of evidence: a documented 
 
 ## 14. Bibliography
 
-Titles of Portuguese-language resources are translated into English below. Institutional web pages without a stated publication date are identified as *n.d.* Online documentation was consulted on 16 September 2026. The equations are explanatory formulations in this document's notation; citations distinguish institutional specifications, methodological literature and software documentation.
+Titles of Portuguese-language resources are translated into English below. Institutional web pages without a stated publication date are identified as *n.d.* Links identify the technical references used by the application documentation. The equations are explanatory formulations in this document's notation; citations distinguish institutional specifications, methodological literature and software documentation.
 
 ### 14.1 Portuguese reference systems and DGT specifications
 
@@ -1505,6 +1600,23 @@ Titles of Portuguese-language resources are translated into English below. Insti
 
 26. **Open Design Alliance.** n.d. [ODA File Converter][oda]. Product and download documentation, including supported command-line conversion inputs.
 
+27. **pyproj contributors.** n.d. [Advanced transformation examples][pyproj-advanced]. Area-of-interest selection, missing grid operations and explicit promotion of CRS definitions to 3D.
+
+28. **pyproj contributors.** n.d. [PROJ network settings][pyproj-network]. Explicit control of local versus network-accessible transformation resources.
+
+29. **Direção-Geral do Território (DGT).** n.d. [National EPSG code list][dgt-epsg-codes], in Open Data. Identifies the shared geographic/geocentric PTRA08 codes for the Azores and Madeira.
+
+30. **PROJ contributors.** n.d. [EPSG-derived projected CRS definitions][proj-projected-crs] and [coordinate conversion definitions][proj-conversions]. Primary software database definitions for the supported CRS names, datums, projections, axes and areas of use.
+
+31. **ezdxf contributors.** n.d. [Zoom Layouts][ezdxf-zoom]. Saved viewport fitting, single-window configuration and dependence on the receiving CAD window's aspect ratio.
+
+32. **ezdxf contributors.** n.d. [HATCH entity reference][ezdxf-hatch]. Boundary paths, object-coordinate-system geometry and stored seed points.
+
+33. **ezdxf contributors.** n.d. [Text entity and placement API][ezdxf-text]. Active insertion/alignment positions, FIT/ALIGNED endpoints and world-coordinate interpretation through the object's coordinate system. Consulted on 18 September 2026 for the saved-geometry verification fix.
+
+[pyproj-advanced]: https://pyproj4.github.io/pyproj/stable/advanced_examples.html
+[pyproj-network]: https://pyproj4.github.io/pyproj/stable/api/network.html
+
 [dgt-systems]: https://www.dgterritorio.gov.pt/atividades/geodesia/sistemas-referencia
 [dgt-tm06]: https://www.dgterritorio.gov.pt/atividades/geodesia/sistemas-referencia/portugal-continental/PT-TM06-ETRS89
 [dgt-transform]: https://www.dgterritorio.gov.pt/atividades/geodesia/transformacao-coordenadas/portugal-continental
@@ -1519,7 +1631,7 @@ Titles of Portuguese-language resources are translated into English below. Insti
 [dgt-molodensky-form]: https://www.dgterritorio.gov.pt/sites/default/files/ficheiros-geodesia/Form_Molodensky.pdf
 [dgt-helmert-form]: https://www.dgterritorio.gov.pt/sites/default/files/ficheiros-geodesia/Form_Bursa-Wolf.pdf
 [goncalves-paper]: https://www.fc.up.pt/pessoas/jagoncal/coordenadas/paper_cncg2009.pdf
-[goncalves-web]: https://www.fc.up.pt/pessoas/jagoncal/coordenadas2/
+[goncalves-web]: https://www.fc.up.pt/pessoas/jagoncal/coord/
 [iogp-gn7]: https://www.iogp.org/wp-content/uploads/2019/09/373-07-02.pdf
 [snyder]: https://pubs.usgs.gov/publication/pp1395
 [jcgm]: https://www.bipm.org/documents/20126/2071204/JCGM_100_2008_E.pdf
@@ -1531,3 +1643,20 @@ Titles of Portuguese-language resources are translated into English below. Insti
 [pyproj-transformer]: https://pyproj4.github.io/pyproj/stable/api/transformer.html
 [ezdxf-oda]: https://ezdxf.readthedocs.io/en/stable/addons/odafc.html
 [oda]: https://www.opendesign.com/guestfiles/oda_file_converter
+
+[dgt-epsg-codes]: https://www.dgterritorio.gov.pt/dados-abertos
+[proj-projected-crs]: https://raw.githubusercontent.com/OSGeo/PROJ/master/data/sql/projected_crs.sql
+[proj-conversions]: https://raw.githubusercontent.com/OSGeo/PROJ/refs/heads/master/data/sql/conversion.sql
+
+[ezdxf-zoom]: https://ezdxf.readthedocs.io/en/stable/tools/zoom.html
+[ezdxf-hatch]: https://ezdxf.readthedocs.io/en/stable/dxfentities/hatch.html
+
+[ezdxf-entities]: https://ezdxf.readthedocs.io/en/stable/usage_for_beginners.html#delete-entities
+
+[ezdxf-text]: https://ezdxf.readthedocs.io/en/stable/dxfentities/text.html
+
+[ezdxf-ellipse]: https://ezdxf.readthedocs.io/en/stable/dxfentities/ellipse.html
+[ezdxf-lwpolyline]: https://ezdxf.readthedocs.io/en/stable/dxfentities/lwpolyline.html
+[ezdxf-proxy]: https://ezdxf.readthedocs.io/en/stable/dxfentities/acad_proxy_entity.html
+
+[pyproj-geod]: https://pyproj4.github.io/pyproj/stable/api/geod.html
