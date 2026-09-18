@@ -1072,10 +1072,10 @@ The core packages are pinned to the API baseline used for application verificati
 
 ### 10.2 Create and activate the virtual environment
 
-Place `script.py`, `README.md` and the four chosen grid files in a working folder, for example `C:\DOWNLOADS\cad-epsg-conversion`. Open **Windows Command Prompt** (`cmd.exe`) there. The following are shell commands, not Python statements for the `>>>` prompt:
+Place `script.py`, `README.md` and the four chosen grid files in a working folder, for example `C:\cad-epsg-conversion`. Open **Windows Command Prompt** (`cmd.exe`) there. The following are shell commands, not Python statements for the `>>>` prompt:
 
 ```bat
-cd /d "C:\DOWNLOADS\cad-epsg-conversion"
+cd /d "C:\cad-epsg-conversion"
 py -m venv .venv
 call .venv\Scripts\activate.bat
 python -c "import sys; assert sys.prefix != sys.base_prefix"
@@ -1138,7 +1138,7 @@ Check the selected transformation through **Validate transformation**, then conv
 Each new Command Prompt needs activation before using the abbreviated commands in this document:
 
 ```bat
-cd /d "C:\DOWNLOADS\cad-epsg-conversion"
+cd /d "C:\cad-epsg-conversion"
 call .venv\Scripts\activate.bat
 python script.py
 deactivate
