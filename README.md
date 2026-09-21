@@ -2,9 +2,9 @@
 
 ## Geodetic foundations, DGT guidance and implementation with PT-TM06/ETRS89 (EPSG:3763)
 
-The production application converts DXF/DWG drawings between 39 configured coordinate reference systems, with datum-specific GSB transformations, a live progress bar and estimated finish datetime, and a fitted CAD startup view. **Out-of-grid cleanup is enabled by default:** complete affected objects are omitted and recorded; valid objects continue through the full coordinate operation. Strict mode disables this cleanup. The input drawings are never changed.
+The production application converts DXF/DWG drawings between Portuguese configured coordinate reference systems, with datum-specific GSB transformations, a live progress bar and estimated finish datetime, and a fitted CAD startup view. Out-of-grid cleanup is enabled by default: complete affected objects are omitted and recorded; valid objects continue through the full coordinate operation. Strict mode disables this cleanup. The input drawings are never changed.
 
-This production revision corrects saved HATCH/MPOLYGON closing-point verification for geographic outputs such as EPSG:4326, using the unchanged metre-valued publication tolerance. It retains the ellipse sampler, bounded array processing and distinction between successful optional-coordinate cleanup and unresolved geometry. The application version remains **1.0**.
+This production revision corrects saved HATCH/MPOLYGON closing-point verification for geographic outputs such as EPSG:4326, using the unchanged metre-valued publication tolerance. It retains the ellipse sampler, bounded array processing and distinction between successful optional-coordinate cleanup and unresolved geometry.
 
 This release consists of `script.py` and `README.md`. Keep the existing GSB files beside the script or executable, or select their directory in Advanced settings. The application does not download grids and does not require the development test or benchmark scripts at runtime.
 
@@ -1598,7 +1598,7 @@ Titles of Portuguese-language resources are translated into English below. Insti
 [dgt-polynomial-form]: https://www.dgterritorio.gov.pt/sites/default/files/ficheiros-geodesia/Form_Pol2.pdf
 [dgt-molodensky-form]: https://www.dgterritorio.gov.pt/sites/default/files/ficheiros-geodesia/Form_Molodensky.pdf
 [dgt-helmert-form]: https://www.dgterritorio.gov.pt/sites/default/files/ficheiros-geodesia/Form_Bursa-Wolf.pdf
-[goncalves-paper]: https://www.fc.up.pt/pessoas/jagoncal/coordenadas/paper_cncg2009.pdf
+[goncalves-paper]: https://scholar.google.com/citations?view_op=view_citation&citation_for_view=2QzFhjIAAAAJ:mB3voiENLucC
 [goncalves-web]: https://www.fc.up.pt/pessoas/jagoncal/coord/
 [iogp-gn7]: https://www.iogp.org/wp-content/uploads/2019/09/373-07-02.pdf
 [snyder]: https://pubs.usgs.gov/publication/pp1395
